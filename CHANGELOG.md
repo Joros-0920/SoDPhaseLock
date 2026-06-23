@@ -4,6 +4,16 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.2.0] - 2026-06-23
+
+### Added
+- Quest phase database (`Data/Quests.lua`): a 384-quest phase map (P2–P7) plus the Nightmare Incursions, sourced from Questie.
+
+### Changed
+- **Quest enforcement is now a hard block** (previously warn-only): declines the accept dialog (`QUEST_DETAIL`), abandons quests that slip in via sharing or auto-accept (`QUEST_ACCEPTED`), and closes the turn-in window (`QUEST_PROGRESS` / `QUEST_COMPLETE`). A full scan also sweeps and abandons any banned quests already in the log. Quest violations are now reported to the compliance roster.
+
+---
+
 ## [0.1.0] - 2026-06-23
 
 ### Added
