@@ -1,0 +1,29 @@
+## Interface: 11507
+## Title: SoD Phase Lock
+## Notes: Coordinate and lock a guild to a chosen Season of Discovery phase (authentic or relaxed).
+## Author: Joros
+## Version: 0.1.0
+## SavedVariables: SoDPhaseLockDB
+## IconTexture: Interface\Icons\inv_misc_pocketwatch_01
+## X-Category: Guild
+## OptionalDeps: Baganator
+
+# Embedded libraries
+embeds.xml
+
+# Static phase ruleset data
+Data\Phases.lua
+
+# Core (addon object, DB, accessors, slash command, alerts)
+Core\Core.lua
+
+# Feature modules
+Modules\Enforcement.lua
+Modules\Comm.lua
+Modules\Compliance.lua
+
+# UI
+UI\Options.lua
+UI\Roster.lua
+UI\Welcome.lua
+UI\BagOverlay.lua

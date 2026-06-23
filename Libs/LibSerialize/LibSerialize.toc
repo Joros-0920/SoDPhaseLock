@@ -1,0 +1,11 @@
+## Interface: 11507
+## Title: Lib: LibSerialize
+## Notes: Library for efficiently serializing/deserializing arbitrary values.
+## Author: Ross Nichols
+## Version: 5
+## OptionalDeps: LibStub
+## X-License: MIT
+
+# Standalone load is not used by SoDPhaseLock (loaded via ..\..\embeds.xml).
+embeds.xml
+LibSerialize.lua
