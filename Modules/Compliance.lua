@@ -24,6 +24,7 @@ function Compliance:Record(sender, data)
     if data.vI == 1 then reasons[#reasons + 1] = "in locked instance" end
     if (data.vG or 0) > 0 then reasons[#reasons + 1] = string.format("%d illegal item(s)", data.vG) end
     if data.vP == 1 then reasons[#reasons + 1] = "profession over cap" end
+    if (data.vQ or 0) > 0 then reasons[#reasons + 1] = string.format("%d quest(s) from later phase", data.vQ) end
     if data.vR == 1 then reasons[#reasons + 1] = "rune from later phase" end
 
     self.roster[name] = {
@@ -35,6 +36,7 @@ function Compliance:Record(sender, data)
         instance   = data.vI == 1,
         gear       = data.vG or 0,
         profession = data.vP == 1,
+        quest      = data.vQ or 0,
         rune       = data.vR == 1,
         compliant  = (#reasons == 0),
         reasons    = (#reasons == 0) and "OK" or table.concat(reasons, ", "),

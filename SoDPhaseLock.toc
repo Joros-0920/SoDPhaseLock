@@ -13,6 +13,7 @@ embeds.xml
 
 # Static phase ruleset data
 Data\Phases.lua
+Data\Quests.lua
 
 # Core (addon object, DB, accessors, slash command, alerts)
 Core\Core.lua

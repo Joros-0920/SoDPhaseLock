@@ -9,6 +9,7 @@ Enforcement.violations = {
     instance   = false,   -- currently inside a not-yet-unlocked instance
     gear       = 0,       -- count of equipped over-phase items
     profession = false,
+    quest      = 0,       -- count of accepted quests from a later phase (authentic only)
     rune       = false,   -- learned at least one rune from a later phase (authentic only)
 }
 
@@ -28,8 +29,10 @@ function Enforcement:OnEnable()
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED",  "CheckGear")
     self:RegisterEvent("GET_ITEM_INFO_RECEIVED",    "CheckGear")
     self:RegisterEvent("SKILL_LINES_CHANGED",       "CheckProfessions")
+    self:RegisterEvent("QUEST_DETAIL",              "OnQuestDetail")
     self:RegisterEvent("QUEST_ACCEPTED",            "OnQuestAccepted")
-    self:RegisterEvent("QUEST_TURNED_IN",           "OnQuestTurnedIn")
+    self:RegisterEvent("QUEST_PROGRESS",            "OnQuestInteract")
+    self:RegisterEvent("QUEST_COMPLETE",            "OnQuestInteract")
     self:RegisterEvent("PLAYER_REGEN_ENABLED",      "FlushUnequip")
     self:RegisterEvent("MERCHANT_SHOW",             "OnInteractNPC")
     self:RegisterEvent("GOSSIP_SHOW",               "OnInteractNPC")
@@ -56,6 +59,7 @@ function Enforcement:FullScan()
     self:OnZoneChanged()
     self:CheckGear()
     self:CheckProfessions()
+    self:CheckQuestLog()
     self:CheckRune()
 end
 
@@ -354,24 +358,105 @@ function Enforcement:CheckProfessions()
 end
 
 -- ---------------------------------------------------------------------------
--- Quests (authentic only)
+-- Quests (authentic only) — hard-block content from a later phase.
+--
+-- WoW can't hard-cancel a quest server-side, so "blocking" is layered:
+--   1. QUEST_DETAIL  -> DeclineQuest(): close the accept dialog (true pre-accept
+--      block for the normal talk-to-NPC case).
+--   2. QUEST_ACCEPTED -> abandon: catch quests that slipped in via quest sharing,
+--      auto-accept addons, or right-click auto-accept.
+--   3. QUEST_PROGRESS / QUEST_COMPLETE -> CloseQuest(): block turn-in.
+--   4. CheckQuestLog (login / ruleset change / scan): abandon any banned quest
+--      already in the log and report the count to guild compliance.
+-- The authentic-mode quest rule toggle is the on/off switch.
 -- ---------------------------------------------------------------------------
-local function checkQuest(questID)
-    if not (Addon.db.profile.enabled and authentic() and enabled("quest")) then return end
-    local phase = P()
-    if phase and questID and phase.bannedQuests[questID] then
-        Addon:Alert("That quest is part of content not yet unlocked this phase.", "quest" .. questID)
+local function isQuestBlocked(questID)
+    if not (Addon.db.profile.enabled and authentic() and enabled("quest")) then return false end
+    return ns.QuestBlockedAtPhase(questID, Addon:GetActivePhase())
+end
+
+local function questName(questID)
+    local title = C_QuestLog and C_QuestLog.GetTitleForQuestID and C_QuestLog.GetTitleForQuestID(questID)
+    return title or "That quest"
+end
+
+local function unlockLabel(questID)
+    local p = ns.GetQuestUnlockPhase(questID)
+    local data = p and ns.Phases[p]
+    return data and data.name or "a later phase"
+end
+
+-- action: "block" (declined / turn-in blocked) or "abandon" (removed from log).
+local function questAlert(questID, action, key)
+    local msg
+    if action == "abandon" then
+        msg = string.format("Removed %s — not available until %s.", questName(questID), unlockLabel(questID))
+    else
+        msg = string.format("%s is not available until %s — blocked.", questName(questID), unlockLabel(questID))
+    end
+    Addon:Alert(msg, key or ("quest" .. tostring(questID)))
+end
+
+-- Abandon a quest by ID (modern C_QuestLog; safe to call when not in the log).
+local function abandonQuestByID(questID)
+    if not (questID and C_QuestLog and C_QuestLog.GetLogIndexForQuestID) then return end
+    if not C_QuestLog.GetLogIndexForQuestID(questID) then return end  -- not in the log
+    if C_QuestLog.SetSelectedQuest then C_QuestLog.SetSelectedQuest(questID) end
+    if C_QuestLog.SetAbandonQuest then C_QuestLog.SetAbandonQuest() end
+    if C_QuestLog.AbandonQuest then C_QuestLog.AbandonQuest() end
+end
+
+-- QUEST_DETAIL: the quest-giver accept dialog is open for GetQuestID().
+function Enforcement:OnQuestDetail()
+    local questID = GetQuestID and GetQuestID()
+    if isQuestBlocked(questID) then
+        if DeclineQuest then DeclineQuest() end
+        questAlert(questID, "block")
     end
 end
 
--- QUEST_ACCEPTED(questLogIndex, questID)
-function Enforcement:OnQuestAccepted(_, _, questID)
-    checkQuest(questID)
+-- QUEST_PROGRESS / QUEST_COMPLETE: turn-in dialog open for GetQuestID().
+function Enforcement:OnQuestInteract()
+    local questID = GetQuestID and GetQuestID()
+    if isQuestBlocked(questID) then
+        if CloseQuest then CloseQuest() end
+        questAlert(questID, "block")
+    end
 end
 
--- QUEST_TURNED_IN(questID, xpReward, moneyReward)
-function Enforcement:OnQuestTurnedIn(_, questID)
-    checkQuest(questID)
+-- QUEST_ACCEPTED(questLogIndex, questID) — slipped past the dialog block.
+function Enforcement:OnQuestAccepted(_, _, questID)
+    if isQuestBlocked(questID) then
+        questAlert(questID, "abandon")
+        abandonQuestByID(questID)
+    end
+end
+
+-- Scan the quest log for banned quests (e.g. accepted before the lock, or shared
+-- in), abandon them, and report the count to guild compliance.
+function Enforcement:CheckQuestLog()
+    if not (Addon.db.profile.enabled and authentic() and enabled("quest")) then
+        self.violations.quest = 0
+        return
+    end
+    if not (C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo) then
+        self.violations.quest = 0
+        return
+    end
+    local activePhase = Addon:GetActivePhase()
+    -- Collect first: abandoning mutates the log, so don't abandon mid-iteration.
+    local blocked = {}
+    for i = 1, C_QuestLog.GetNumQuestLogEntries() do
+        local info = C_QuestLog.GetInfo(i)
+        if info and not info.isHeader and ns.QuestBlockedAtPhase(info.questID, activePhase) then
+            blocked[#blocked + 1] = info.questID
+        end
+    end
+    self.violations.quest = #blocked
+    for _, questID in ipairs(blocked) do
+        questAlert(questID, "abandon", "questlog" .. questID)
+        abandonQuestByID(questID)
+    end
 end
 
 -- ---------------------------------------------------------------------------

@@ -86,6 +86,7 @@ function Comm:SendStatus()
         vI    = v.instance and 1 or 0,
         vG    = v.gear or 0,
         vP    = v.profession and 1 or 0,
+        vQ    = v.quest or 0,
         vR    = v.rune and 1 or 0,
     })
 end

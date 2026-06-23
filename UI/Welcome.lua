@@ -138,7 +138,8 @@ local function buildWelcomeFrame()
         "Full |cffffd100phase enforcement|r.\n\n" ..
         "Blocks phase-gated instances. Over-phase gear is flagged and auto-removed " ..
         "out of combat; bind-on-equip prompts are cancelled before the item binds. " ..
-        "Enforces profession skill caps, and flags quests and runes from future phases.",
+        "Enforces profession skill caps, blocks quests from future phases " ..
+        "(accept dialog declined, quest abandoned if it slips in), and flags later-phase runes.",
         "Play Authentic", "authentic", f)
 
     -- ── Officer / member notice ───────────────────────────────────────────────
