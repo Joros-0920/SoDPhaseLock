@@ -33,6 +33,11 @@ local function send(tbl)
 end
 
 -- ---------------------------------------------------------------------------
+-- Ask the current guild to send us its ruleset (login + on guild change).
+function Comm:RequestSync()
+    send({ t = "REQ" })
+end
+
 function Comm:OnEnable()
     self:RegisterComm(PREFIX, "OnComm")
     -- On login: ask the guild for the current ruleset, then start status pings.

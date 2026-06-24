@@ -24,7 +24,7 @@ local function applyMode(mode, frame)
     if Addon:IsOfficer() then
         Addon:SetRulesetAsOfficer(Addon:GetActivePhase(), mode)
     else
-        Addon.db.global.ruleset.mode = mode
+        Addon:GetRuleset().mode = mode
         local e = Addon:GetModule("Enforcement", true)
         if e then e:FullScan() end
         if ns.RefreshOptions then ns.RefreshOptions() end
@@ -139,7 +139,8 @@ local function buildWelcomeFrame()
         "Blocks phase-gated instances. Over-phase gear is flagged and auto-removed " ..
         "out of combat; bind-on-equip prompts are cancelled before the item binds. " ..
         "Enforces profession skill caps, blocks quests from future phases " ..
-        "(accept dialog declined, quest abandoned if it slips in), and flags later-phase runes.",
+        "(accept dialog declined, quest abandoned if it slips in), and blocks engraving "  ..
+        "later-phase runes onto gear.",
         "Play Authentic", "authentic", f)
 
     -- ── Officer / member notice ───────────────────────────────────────────────

@@ -41,6 +41,16 @@ function Enforcement:OnEnable()
         -- RUNE_UPDATED fires when a rune is engraved/changed in a slot; wrap in
         -- pcall so an unknown event name on older builds can't abort OnEnable.
         pcall(self.RegisterEvent, self, "RUNE_UPDATED", "CheckRune")
+        -- Engraving a rune onto a slot routes through C_Engraving.CastRune. Post-hook
+        -- it so we can abort the cast for later-phase runes before it completes
+        -- (the rune analogue of the gear auto-unequip block). hooksecurefunc only
+        -- observes — it can't prevent the call — so OnRuneCast cancels the cast.
+        if C_Engraving.CastRune and not self.runeCastHooked then
+            self.runeCastHooked = true
+            pcall(hooksecurefunc, C_Engraving, "CastRune", function(...)
+                Enforcement:OnRuneCast(...)
+            end)
+        end
     end
     -- Bind-on-equip confirmation popups: cancel them for over-phase items so the
     -- item never binds/equips. These event names vary by client build, so register
@@ -460,16 +470,41 @@ function Enforcement:CheckQuestLog()
 end
 
 -- ---------------------------------------------------------------------------
--- Runes (authentic only). Scans ALL runes the player has learned (not just
--- currently engraved ones) via C_Engraving.GetRunes().
+-- Runes (authentic only).
 --
--- Violation check (two strategies, first available wins):
---   1. If phase.runes is seeded (explicit allowlist): any learned rune whose
---      spellID is absent from the allowlist is from a later phase.
+-- Two enforcement points:
+--   * CheckRune (login / ruleset change / RUNE_UPDATED) audits every rune the
+--     player has LEARNED and flags any from a later phase for guild compliance.
+--   * OnRuneCast blocks the act of ENGRAVING a later-phase rune onto a slot from
+--     the character-sheet engraving panel — the rune analogue of gear blocking.
+--
+-- Violation check (`runeViolatesPhase`, two strategies, first available wins):
+--   1. If phase.runes is seeded (explicit allowlist): any rune whose spellID is
+--      absent from the allowlist is from a later phase.
 --   2. Fallback: check the rune's source-item required level against the phase
 --      level cap. Works without a hardcoded database as long as the rune token
 --      items carry the correct required level.
 -- ---------------------------------------------------------------------------
+local function runeSpellID(rune)
+    return rune and (rune.skillLineAbilityID or rune.learnedAbilitySpellID)
+end
+
+local function runeViolatesPhase(rune, phase)
+    if not (rune and phase) then return false end
+    if next(phase.runes) then  -- explicit per-phase allowlist
+        local spellID = runeSpellID(rune)
+        return spellID ~= nil and not phase.runes[spellID]
+    end
+    if rune.itemID then
+        -- Fallback: rune token item reqLevel > phase cap → later-phase rune.
+        local reqLevel = select(5, GetItemInfo(rune.itemID))
+        return reqLevel ~= nil and reqLevel > phase.levelCap
+    end
+    return false
+end
+-- Shared with the UI for engraving-panel decoration.
+ns.RuneViolatesPhase = runeViolatesPhase
+
 function Enforcement:CheckRune()
     if not (Addon.db.profile.enabled and authentic() and enabled("rune")) then
         self.violations.rune = false
@@ -482,23 +517,58 @@ function Enforcement:CheckRune()
     local phase = P()
     if not phase then return end
 
-    local hasAllowlist = next(phase.runes)  -- explicit per-phase rune database
     local anyViolation = false
     for _, rune in ipairs(C_Engraving.GetRunes() or {}) do
-        local spellID = rune.skillLineAbilityID or rune.learnedAbilitySpellID
-        local violated = false
-        if hasAllowlist then
-            violated = spellID ~= nil and not phase.runes[spellID]
-        elseif rune.itemID then
-            -- Fallback: rune token item reqLevel > phase cap → later-phase rune.
-            local reqLevel = select(5, GetItemInfo(rune.itemID))
-            violated = reqLevel ~= nil and reqLevel > phase.levelCap
-        end
-        if violated then
+        if runeViolatesPhase(rune, phase) then
             anyViolation = true
+            local spellID = runeSpellID(rune)
             local label = rune.name or (spellID and ("spell:" .. spellID)) or "Unknown Rune"
             Addon:Alert(label .. " is a rune from a later phase.", "rune" .. tostring(spellID or label))
         end
     end
     self.violations.rune = anyViolation
+end
+
+-- Resolve the rune being engraved. C_Engraving.CastRune's argument differs by
+-- build (skillLineAbilityID on some, the learned spellID on others), so prefer
+-- the authoritative GetCurrentRuneCast() and fall back to matching either id
+-- field against the learned rune list. Returns nil when it can't be resolved
+-- (we then decline to block, to avoid false positives).
+local function resolveCastRune(arg)
+    if C_Engraving.GetCurrentRuneCast then
+        local cur = C_Engraving.GetCurrentRuneCast()
+        if cur then return cur end
+    end
+    if arg ~= nil and C_Engraving.GetRunes then
+        for _, rune in ipairs(C_Engraving.GetRunes() or {}) do
+            if rune.skillLineAbilityID == arg or rune.learnedAbilitySpellID == arg then
+                return rune
+            end
+        end
+    end
+    return nil
+end
+
+-- Post-hook of C_Engraving.CastRune: the engraving cast has already started by
+-- the time we run, so for a later-phase rune we abort the in-progress cast (and
+-- clear the pending selection) before it can apply to the slot. Gated on the
+-- guild "block over-phase gear" setting; warn-only when blocking is off.
+function Enforcement:OnRuneCast(arg)
+    if not (Addon.db.profile.enabled and authentic() and enabled("rune")) then return end
+    local phase = P()
+    if not phase then return end
+    local rune = resolveCastRune(arg)
+    if not runeViolatesPhase(rune, phase) then return end
+
+    local label = (rune and rune.name) or "That rune"
+    if Addon:AutoUnequip() then
+        -- Abort the engraving cast. SpellStopCasting may be protected on some
+        -- builds, so guard it; ClearCurrentRuneCast drops the queued selection so
+        -- the panel doesn't keep trying to apply it.
+        if SpellStopCasting then pcall(SpellStopCasting) end
+        if C_Engraving.ClearCurrentRuneCast then pcall(C_Engraving.ClearCurrentRuneCast) end
+        Addon:Alert(label .. " can't be engraved this phase — engraving cancelled.", "runecast")
+    else
+        Addon:Alert(label .. " is a rune from a later phase and shouldn't be engraved.", "runecast")
+    end
 end

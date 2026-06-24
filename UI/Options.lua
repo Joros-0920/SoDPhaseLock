@@ -66,9 +66,14 @@ local function phaseSummaryText()
     local lines = {}
     lines[#lines + 1] = "|cffffd100Headline raid:|r " .. (d.raid or "\226\128\148")
     if d.event then lines[#lines + 1] = "|cffffd100Event:|r " .. d.event end
+    if d.feature then lines[#lines + 1] = "|cffffd100New feature:|r " .. d.feature end
     lines[#lines + 1] = ""
     lines[#lines + 1] = "|cffffd100Newly unlocked this phase:|r"
     lines[#lines + 1] = bulletList(d.instanceUnlocks, "ff40ff40")
+    lines[#lines + 1] = ""
+    local allInstances = cumulativeInstances(idx)
+    lines[#lines + 1] = string.format("|cffffd100All available instances (%d):|r", #allInstances)
+    lines[#lines + 1] = bulletList(allInstances, "ffffffff")
     lines[#lines + 1] = ""
     local nq = newQuestCount(idx)
     if nq > 0 then
@@ -94,6 +99,7 @@ local function nextPhaseSummaryText()
     out[#out + 1] = ""
     out[#out + 1] = "|cffffd100New raid:|r " .. (nx.raid or "\226\128\148")
     if nx.event then out[#out + 1] = "|cffffd100New Event:|r " .. nx.event end
+    if nx.feature then out[#out + 1] = "|cffffd100New feature:|r " .. nx.feature end
     out[#out + 1] = "|cffffd100New dungeons & raids:|r"
     out[#out + 1] = bulletList(nx.instanceUnlocks, "ffffd100")
     out[#out + 1] = string.format(
@@ -116,6 +122,15 @@ local PANEL_WIDGET_NEXT = "SoDPhasePanelNext"
 do
     local AceGUI = LibStub("AceGUI-3.0")
     local ICON, GAP, LEFT_FRAC, QMARK = 30, 5, 0.58, 134400
+
+    -- Per-phase background art for the panel box, keyed by phase index. Assets are
+    -- TGA (WoW can't load JPG/PNG from disk). Darkened in Lua so the asset stays
+    -- clean and the foreground text remains readable. Phases without art show none.
+    local PHASE_BG = {
+        [1] = "Interface\\AddOns\\SoDPhaseLock\\Assets\\bfd.tga",
+        [2] = "Interface\\AddOns\\SoDPhaseLock\\Assets\\gnomeregan.tga",
+        [3] = "Interface\\AddOns\\SoDPhaseLock\\Assets\\sunken_temple.tga",
+    }
 
     local function iconEnter(self)
         if not self.itemID then return end
@@ -141,6 +156,11 @@ do
         b:SetScript("OnLeave", iconLeave)
         b:SetScript("OnClick", iconClick)
         return b
+    end
+    local function makeSubheader(parent)
+        local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        fs:SetJustifyH("LEFT"); fs:SetJustifyV("TOP")
+        return fs
     end
 
     -- Right-column sections rendered top-to-bottom: {label, source table}.
@@ -168,13 +188,42 @@ do
 
         for _, b in ipairs(self.icons) do b:Hide(); b.itemID = nil end
         for _, h in ipairs(self.headers) do h:Hide(); h:SetText("") end
+        for _, h in ipairs(self.subheaders) do h:Hide(); h:SetText("") end
 
         local phase = self.dropsPhaseFn()
-        local y, iconN = 0, 0
+        local bgPath = phase and PHASE_BG[phase]
+        if bgPath then
+            self.bg:SetTexture(bgPath)
+            self.bg:SetVertexColor(0.40, 0.40, 0.40)  -- darken so text stays legible
+            self.bg:SetAlpha(0.75)
+            self.bg:Show()
+        else
+            self.bg:Hide()
+        end
+
+        local y, iconN, subN = 0, 0, 0
+
+        -- Lay out a flat list of item icons starting at the current y; advances y.
+        local function layoutIcons(list)
+            for i = 1, #list do
+                iconN = iconN + 1
+                local b = self.icons[iconN]
+                if not b then b = makeIcon(frame); self.icons[iconN] = b end
+                b.itemID = list[i]
+                b.tex:SetTexture((GetItemIcon and GetItemIcon(list[i])) or QMARK)
+                local col, row = (i - 1) % per, math.floor((i - 1) / per)
+                b:ClearAllPoints()
+                b:SetPoint("TOPLEFT", frame, "TOPLEFT",
+                    rightX + col * (ICON + GAP), -(y + row * (ICON + GAP)))
+                b:Show()
+            end
+            y = y + math.ceil(#list / per) * (ICON + GAP) + 8
+        end
+
         for s = 1, #SECTIONS do
             local sec = SECTIONS[s]
-            local items = phase and ns[sec.src] and ns[sec.src][phase]
-            if items and #items > 0 then
+            local data = phase and ns[sec.src] and ns[sec.src][phase]
+            if data and #data > 0 then
                 local hdr = self.headers[s]
                 hdr:ClearAllPoints()
                 hdr:SetPoint("TOPLEFT", frame, "TOPLEFT", rightX, -y)
@@ -182,19 +231,29 @@ do
                 hdr:SetText(sec.label)
                 hdr:Show()
                 y = y + hdr:GetStringHeight() + 4
-                for i = 1, #items do
-                    iconN = iconN + 1
-                    local b = self.icons[iconN]
-                    if not b then b = makeIcon(frame); self.icons[iconN] = b end
-                    b.itemID = items[i]
-                    b.tex:SetTexture((GetItemIcon and GetItemIcon(items[i])) or QMARK)
-                    local col, row = (i - 1) % per, math.floor((i - 1) / per)
-                    b:ClearAllPoints()
-                    b:SetPoint("TOPLEFT", frame, "TOPLEFT",
-                        rightX + col * (ICON + GAP), -(y + row * (ICON + GAP)))
-                    b:Show()
+                if type(data[1]) == "table" then
+                    -- Grouped: each entry is { profession = "...", items = {...} },
+                    -- rendered as a sub-header + its own icon grid (used by the
+                    -- Crafted Epics section so epics are split per profession).
+                    for g = 1, #data do
+                        local grp = data[g]
+                        local list = grp.items or grp
+                        if list and #list > 0 then
+                            subN = subN + 1
+                            local sh = self.subheaders[subN]
+                            if not sh then sh = makeSubheader(frame); self.subheaders[subN] = sh end
+                            sh:ClearAllPoints()
+                            sh:SetPoint("TOPLEFT", frame, "TOPLEFT", rightX, -y)
+                            sh:SetWidth(rightW)
+                            sh:SetText("|cffffe680" .. (grp.profession or grp.label or "?") .. "|r")
+                            sh:Show()
+                            y = y + sh:GetStringHeight() + 2
+                            layoutIcons(list)
+                        end
+                    end
+                else
+                    layoutIcons(data)
                 end
-                y = y + math.ceil(#items / per) * (ICON + GAP) + 8
             end
         end
 
@@ -229,6 +288,9 @@ do
         local function Constructor()
             local frame = CreateFrame("Frame", nil, UIParent)
             frame:Hide()
+            local bg = frame:CreateTexture(nil, "BACKGROUND")
+            bg:SetAllPoints(frame)
+            bg:Hide()
             local left = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
             left:SetJustifyH("LEFT"); left:SetJustifyV("TOP")
             local headers = {}
@@ -238,8 +300,9 @@ do
                 headers[s] = hdr
             end
             local widget = {
-                frame = frame, type = typeName, left = left, headers = headers, icons = {},
-                summaryFn = summaryFn, dropsPhaseFn = dropsPhaseFn,
+                frame = frame, type = typeName, left = left, headers = headers,
+                subheaders = {}, icons = {},
+                bg = bg, summaryFn = summaryFn, dropsPhaseFn = dropsPhaseFn,
             }
             for k, v in pairs(methods) do widget[k] = v end
             frame.obj = widget
@@ -345,19 +408,6 @@ local options = {
                         },
                     },
                 },
-                available = {
-                    type = "group", inline = true, order = 20, name = "All Available Instances",
-                    args = {
-                        body = {
-                            type = "description", order = 1, fontSize = "medium",
-                            name = function()
-                                local list = cumulativeInstances(Addon:GetActivePhase())
-                                return string.format("|cffffd100%d dungeons & raids enterable:|r\n", #list)
-                                    .. bulletList(list, "ffffffff")
-                            end,
-                        },
-                    },
-                },
                 comingNext = {
                     type = "group", inline = true, order = 30, name = "Coming Next",
                     args = {
@@ -401,7 +451,7 @@ local options = {
                             disabled = notOfficer,
                             get = function() return Addon:GetNextPhaseDate() end,
                             set = function(_, v)
-                                Addon.db.global.ruleset.nextPhaseDate = v or ""
+                                Addon:GetRuleset().nextPhaseDate = v or ""
                                 commitGuild((v and v ~= "") and ("Next phase date: " .. v) or "Next phase date: cleared")
                             end,
                         },
@@ -431,7 +481,7 @@ local options = {
                             disabled = notGuildLeader,
                             get = function() return Addon:AutoUnequip() end,
                             set = function(_, v)
-                                Addon.db.global.ruleset.autoUnequip = v
+                                Addon:GetRuleset().autoUnequip = v
                                 commitGuild("Block over-phase gear: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
                             end,
                         },
@@ -441,7 +491,7 @@ local options = {
                             min = 0, max = 600, step = 5, disabled = notGuildLeader,
                             get = function() return Addon:InstanceGrace() end,
                             set = function(_, v)
-                                Addon.db.global.ruleset.instanceGrace = v
+                                Addon:GetRuleset().instanceGrace = v
                                 commitGuild("Instance grace period: " .. v .. "s")
                             end,
                         },
@@ -453,11 +503,15 @@ local options = {
 }
 
 -- Warm the item cache so drop icons/tooltips resolve on first panel open.
+-- Lists are either flat itemID arrays or grouped { {profession, items}, ... }.
 if GetItemInfo then
-    for _, tbl in ipairs({ ns.PhaseRaidDrops, ns.PhaseCraftedEpics, ns.PhaseNewConsumes }) do
-        for _, list in pairs(tbl or {}) do
-            for _, itemID in ipairs(list) do GetItemInfo(itemID) end
+    local function warm(list)
+        for _, v in ipairs(list) do
+            if type(v) == "table" then warm(v.items or v) else GetItemInfo(v) end
         end
+    end
+    for _, tbl in ipairs({ ns.PhaseRaidDrops, ns.PhaseCraftedEpics, ns.PhaseNewConsumes }) do
+        for _, list in pairs(tbl or {}) do warm(list) end
     end
 end
 
@@ -483,9 +537,9 @@ do
                 -- regardless of the active mode so they can configure in advance.
                 return false
             end,
-            get = function() return Addon.db.global.ruleset.enforce[r.key] end,
+            get = function() return Addon:GetRuleset().enforce[r.key] end,
             set = function(_, v)
-                Addon.db.global.ruleset.enforce[r.key] = v
+                Addon:GetRuleset().enforce[r.key] = v
                 commitGuild(r.name .. ": " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
             end,
         }
@@ -511,16 +565,16 @@ do
             type = "toggle", order = r.order,
             name = r.name .. (r.authentic and " |cff888888|r" or ""),
             desc = function()
-                if Addon.db.global.ruleset.enforce[key] then
+                if Addon:GetRuleset().enforce[key] then
                     return "Already enforced by the guild — cannot be disabled."
                 end
                 return "Enable this restriction for yourself only, regardless of guild mode."
             end,
             -- Greyed out when the guild already has it on; player can't reduce it.
-            disabled = function() return Addon.db.global.ruleset.enforce[key] end,
+            disabled = function() return Addon:GetRuleset().enforce[key] end,
             -- Show effective state so guild-enforced rules appear checked.
             get = function()
-                return Addon.db.global.ruleset.enforce[key]
+                return Addon:GetRuleset().enforce[key]
                     or (Addon.db.profile.personalChallenges[key] == true)
             end,
             set = function(_, v)

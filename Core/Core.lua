@@ -14,27 +14,33 @@ ns.COMM_PREFIX = PREFIX
 -- ---------------------------------------------------------------------------
 local defaults = {
     global = {
-        -- The active ruleset. Set by officers (phase/mode/rank) and the guild
-        -- leader (enforcement config), synced to all members. Highest epoch wins.
-        ruleset = {
-            phase = 1,
-            mode  = "relaxed",   -- "relaxed" | "authentic"
-            epoch = 0,           -- monotonically increasing; highest wins
-            setBy = "",          -- player name of whoever last set it
-            -- Guild-controlled enforcement config (guild leader tunes these).
-            enforce = {
-                level      = true,
-                instance   = true,   -- authentic only
-                gear       = true,   -- authentic only
-                profession = true,   -- authentic only
-                quest      = true,   -- authentic only
-                rune       = true,   -- authentic only
-                runebroker = true,   -- authentic only: close Rune Broker window on interact
+        -- The active ruleset, keyed by guild context. db.global is shared across
+        -- ALL characters on the account, so a single shared ruleset table lets a
+        -- guildless alt's edits bleed into a guilded main (and one guild's config
+        -- into another). Instead we bucket per guild name ("" = no guild), so each
+        -- guild context — and the guildless/solo context — has its own ruleset.
+        -- Set by officers (phase/mode/rank) and the guild leader (enforcement
+        -- config), synced to all members of that guild. Highest epoch wins.
+        rulesets = {
+            ["*"] = {
+                phase = 1,
+                mode  = "relaxed",   -- "relaxed" | "authentic"
+                epoch = 0,           -- monotonically increasing; highest wins
+                setBy = "",          -- player name of whoever last set it
+                -- Guild-controlled enforcement config (guild leader tunes these).
+                enforce = {
+                    level      = true,
+                    instance   = true,   -- authentic only
+                    gear       = true,   -- authentic only
+                    profession = true,   -- authentic only
+                    quest      = true,   -- authentic only
+                    rune       = true,   -- authentic only
+                    runebroker = true,   -- authentic only: close Rune Broker window on interact
+                },
+                autoUnequip   = true,    -- auto-remove over-phase gear out of combat
+                instanceGrace = 90,      -- seconds in a locked instance before reporting
+                nextPhaseDate = "",      -- officer-set free-text unlock date, broadcast to all members
             },
-            autoUnequip   = true,    -- auto-remove over-phase gear out of combat
-            instanceGrace = 90,      -- seconds in a locked instance before reporting
-            nextPhaseDate = "",      -- officer-set free-text unlock date, broadcast to all members
-            guildName     = "",      -- guild this ruleset was set/received in; used to detect stale cross-char saves
         },
         officerRankIndex = 1,    -- guild ranks 0..this may set/broadcast the ruleset (0 = GM)
     },
@@ -65,6 +71,35 @@ local defaults = {
 function Addon:OnInitialize()
     self.db = LibStub("AceDB-3.0"):New("SoDPhaseLockDB", defaults, true)
 
+    -- Migrate the legacy single `db.global.ruleset` (pre per-guild buckets) into
+    -- the bucket for the guild it was set in. The old table carried a `guildName`
+    -- field for exactly this; "" if it was set with no guild. Only migrate when the
+    -- target bucket is still untouched (epoch 0) so we never clobber newer data.
+    do
+        local g = self.db.global
+        local legacy = rawget(g, "ruleset")
+        if type(legacy) == "table" then
+            local b = g.rulesets[legacy.guildName or ""]
+            if (b.epoch or 0) == 0 then
+                b.phase         = legacy.phase or b.phase
+                b.mode          = legacy.mode or b.mode
+                b.epoch         = legacy.epoch or b.epoch
+                b.setBy         = legacy.setBy or b.setBy
+                b.instanceGrace = legacy.instanceGrace or b.instanceGrace
+                b.nextPhaseDate = legacy.nextPhaseDate or b.nextPhaseDate
+                if legacy.autoUnequip ~= nil then b.autoUnequip = legacy.autoUnequip end
+                if type(legacy.enforce) == "table" then
+                    for k in pairs(b.enforce) do
+                        if legacy.enforce[k] ~= nil then
+                            b.enforce[k] = legacy.enforce[k] and true or false
+                        end
+                    end
+                end
+            end
+            g.ruleset = nil
+        end
+    end
+
     -- Options + minimap launcher are registered by UI/Options.lua
     if ns.SetupOptions then ns.SetupOptions() end
 
@@ -73,23 +108,10 @@ function Addon:OnInitialize()
 end
 
 function Addon:OnEnable()
-    -- ── Guild-context validation ──────────────────────────────────────────────
-    -- db.global is shared across all characters on the account. If a guildless
-    -- alt (or a character in a different guild) wrote to it, the saved ruleset
-    -- would have a mismatched guildName and a non-zero epoch that blocks the
-    -- REQ response from real guild officers from being applied.
-    -- Fix: reset epoch to 0 here so the REQ response always wins.
-    do
-        local r = self.db.global.ruleset
-        local myGuild = GetGuildInfo("player") or ""
-        if myGuild ~= "" and r.guildName ~= myGuild and r.epoch > 0 then
-            self:Print(string.format(
-                "|cffff8080Saved ruleset was set in a different guild context (%s); " ..
-                "resetting to let your guild sync take over.|r",
-                r.guildName ~= "" and ('"' .. r.guildName .. '"') or "no guild"))
-            r.epoch = 0
-        end
-    end
+    -- Resolve and cache the guild context this character belongs to. The active
+    -- ruleset is the bucket for this key, so a guildless alt and a guilded main on
+    -- the same account never share one (the cause of cross-character bleed).
+    self._guildKey = GetGuildInfo("player") or ""
 
     -- Keep a guild roster handy for officer-rank checks.
     if C_GuildInfo and C_GuildInfo.GuildRoster then
@@ -101,6 +123,9 @@ function Addon:OnEnable()
         -- nothing to cache eagerly; rank lookups read the roster on demand
     end)
 
+    -- Joining/leaving/changing guild mid-session switches which bucket is active.
+    self:RegisterEvent("PLAYER_GUILD_UPDATE", "OnGuildChanged")
+
     if ns.ShowWelcome then
         C_Timer.After(1, ns.ShowWelcome)
     end
@@ -109,16 +134,40 @@ end
 -- ---------------------------------------------------------------------------
 -- Ruleset accessors
 -- ---------------------------------------------------------------------------
-function Addon:GetRuleset()       return self.db.global.ruleset end
-function Addon:GetActivePhase()   return self.db.global.ruleset.phase end
-function Addon:GetMode()          return self.db.global.ruleset.mode end
-function Addon:IsAuthentic()      return self.db.global.ruleset.mode == "authentic" end
-function Addon:GetPhaseData()     return ns.Phases[self.db.global.ruleset.phase] end
+-- The guild context whose ruleset bucket is active for this character ("" = no
+-- guild). Cached in OnEnable and refreshed on PLAYER_GUILD_UPDATE; we fall back
+-- to a live lookup if accessed before OnEnable (e.g. options built at init).
+function Addon:GuildKey()
+    if self._guildKey == nil then
+        self._guildKey = GetGuildInfo("player") or ""
+    end
+    return self._guildKey
+end
+
+-- Re-resolve the active bucket when the player joins, leaves, or changes guild.
+function Addon:OnGuildChanged()
+    local newKey = GetGuildInfo("player") or ""
+    if newKey == self._guildKey then return end
+    self._guildKey = newKey
+    -- Adopt the new context's ruleset locally and ask that guild to sync us up.
+    if ns.RefreshOptions then ns.RefreshOptions() end
+    if ns.RefreshBagOverlays then ns.RefreshBagOverlays() end
+    local enforcement = self:GetModule("Enforcement", true)
+    if enforcement then enforcement:FullScan() end
+    local comm = self:GetModule("Comm", true)
+    if comm and comm.RequestSync then comm:RequestSync() end
+end
+
+function Addon:GetRuleset()       return self.db.global.rulesets[self:GuildKey()] end
+function Addon:GetActivePhase()   return self:GetRuleset().phase end
+function Addon:GetMode()          return self:GetRuleset().mode end
+function Addon:IsAuthentic()      return self:GetRuleset().mode == "authentic" end
+function Addon:GetPhaseData()     return ns.Phases[self:GetRuleset().phase] end
 
 -- Guild-controlled enforcement config (read by Enforcement / BagOverlay).
 -- Personal challenges are ORed in: a player can add restrictions, never remove them.
 function Addon:RuleEnabled(rule)
-    return self.db.global.ruleset.enforce[rule]
+    return self:GetRuleset().enforce[rule]
         or (self.db.profile.personalChallenges[rule] == true)
 end
 
@@ -135,18 +184,18 @@ function Addon:GetEffectiveMode()
     return "authentic"
 end
 
-function Addon:AutoUnequip()       return self.db.global.ruleset.autoUnequip end
-function Addon:InstanceGrace()     return self.db.global.ruleset.instanceGrace or 90 end
-function Addon:GetNextPhaseDate()  return self.db.global.ruleset.nextPhaseDate or "" end
+function Addon:AutoUnequip()       return self:GetRuleset().autoUnequip end
+function Addon:InstanceGrace()     return self:GetRuleset().instanceGrace or 90 end
+function Addon:GetNextPhaseDate()  return self:GetRuleset().nextPhaseDate or "" end
 
 -- Apply a ruleset (from local officer action or an incoming broadcast).
 -- `enforce`, `autoUnequip` and `instanceGrace` are the guild-controlled
 -- enforcement config; they are only present on incoming broadcasts. For local
--- edits they are mutated in `db.global.ruleset` directly before committing, so
--- omitting them here leaves the freshly-edited values untouched.
+-- edits they are mutated in the active ruleset bucket directly before committing,
+-- so omitting them here leaves the freshly-edited values untouched.
 -- Returns true if it was newer than what we had and was applied.
 function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, instanceGrace, nextPhaseDate, silent)
-    local r = self.db.global.ruleset
+    local r = self:GetRuleset()
     if epoch and epoch <= r.epoch then
         return false
     end
@@ -164,11 +213,6 @@ function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, ins
     if instanceGrace ~= nil then r.instanceGrace = instanceGrace end
     if nextPhaseDate ~= nil then r.nextPhaseDate = nextPhaseDate end
 
-    -- Record which guild this ruleset belongs to. On login we compare this against
-    -- the character's actual guild so cross-character / guildless-alt contamination
-    -- of db.global is detected and cleared before the guild sync REQ fires.
-    r.guildName = GetGuildInfo("player") or ""
-
     if not silent then
         local data = ns.Phases[r.phase]
         self:Print(string.format("Ruleset is now |cff00ff00%s|r mode, %s (set by %s).",
@@ -185,17 +229,18 @@ end
 
 -- Officer-driven change: bump epoch, apply locally, broadcast to the guild.
 function Addon:SetRulesetAsOfficer(phase, mode, silent)
-    local r = self.db.global.ruleset
+    local r = self:GetRuleset()
     self:ApplyRuleset(phase, mode, r.epoch + 1, UnitName("player"), nil, nil, nil, nil, silent)
     local comm = self:GetModule("Comm", true)
     if comm then comm:BroadcastRuleset() end
 end
 
 -- Guild-leader change to the enforcement config: the caller has already mutated
--- db.global.ruleset (enforce/autoUnequip/instanceGrace); bump epoch + broadcast
--- the whole ruleset so every member adopts it. Reuses the officer commit path.
+-- the active ruleset bucket (enforce/autoUnequip/instanceGrace); bump epoch +
+-- broadcast the whole ruleset so every member adopts it. Reuses the officer path.
 function Addon:CommitGuildSettings(silent)
-    self:SetRulesetAsOfficer(self.db.global.ruleset.phase, self.db.global.ruleset.mode, silent)
+    local r = self:GetRuleset()
+    self:SetRulesetAsOfficer(r.phase, r.mode, silent)
 end
 
 -- ---------------------------------------------------------------------------

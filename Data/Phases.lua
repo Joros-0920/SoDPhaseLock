@@ -4369,6 +4369,8 @@ ns.Phases = {
         name        = "Phase 3 — Sunken Temple",
         levelCap    = 50,
         raid        = "Sunken Temple",
+        event       = "Nightmare Incursions",
+        feature     = "Dual Spec",
         profCap     = 300,
         instanceUnlocks = {
             "Uldaman",

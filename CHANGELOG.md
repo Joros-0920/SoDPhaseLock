@@ -4,6 +4,24 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.3.1] - 2026-06-24
+
+### Added
+- **Phase 3 (Sunken Temple) loot** in the Overview panel: 9 Unique Drops and a full set of Crafted Epics across Alchemy, Blacksmithing, Enchanting, Engineering, Leatherworking, and Tailoring.
+- **Phase 3 highlights:** the Nightmare Incursions event and a new **Dual Spec** feature, surfaced via a new per-phase `feature` field that renders a "New feature:" line in both the This Phase and Coming Next summaries.
+- **Crafted Epics grouped by profession:** the loot panel now renders a sub-header per profession above its own icon grid. A phase's Crafted Epics may be either a flat list or profession groups; the panel auto-detects the shape. Phases 1–3 are grouped.
+- **Per-phase background art** behind the Overview phase panel (Blackfathom Deeps, Gnomeregan, Sunken Temple), darkened so the foreground text stays legible. Phases without art show none.
+- **Block engraving later-phase runes (authentic mode):** applying a rune from a later phase in the character-sheet engraving panel is now cancelled, not just flagged after the fact — the rune analogue of the over-phase gear block. Gated on the "Block over-phase gear" setting; warn-only when that is off.
+
+### Changed
+- **Overview "This Phase" box** now lists the full set of currently enterable instances inline (the separate "All Available Instances" group was folded into the panel).
+- Phase 1 Crafted Epics list trimmed to Blacksmithing, Leatherworking, and Tailoring (Alchemy, Enchanting, and Engineering removed).
+
+### Fixed
+- **Guild settings no longer bleed across characters on the same account.** The active ruleset (phase, mode, and enforcement config) is now stored per guild instead of in a single account-wide table, so a guildless alt — which acts as its own officer — can no longer change settings that a guilded character on the same account then sees. Each guild (and the no-guild context) keeps its own ruleset; switching guilds mid-session re-syncs from that guild. Existing settings are migrated automatically.
+
+---
+
 ## [0.3.0] - 2026-06-23
 
 ### Added

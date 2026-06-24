@@ -37,35 +37,53 @@ ns.PhaseRaidDrops = {
         13325,   -- Fluorescent Green Mechanostrider (mount)
         213412,  -- Dielectric Safety Shield
     },
+
+    -- Phase 3 — Sunken Temple (lvl 50 raid). User-supplied list.
+    [3] = {
+        220620,
+        221484,
+        220638,
+        220635,
+        220627,
+        220630,
+        220626,
+        220629,
+        220628,
+    },
 }
 
--- Profession-crafted epic gear per phase, shown under "Unique Drops" in the
--- Overview panel. Same itemID-list shape as ns.PhaseRaidDrops.
+-- Profession-crafted epic gear per phase, shown under "Crafted Epics" in the
+-- Overview panel. A phase's value is EITHER a flat itemID array (rendered as one
+-- grid) OR a list of profession groups { profession = "Name", items = { id, ... } }
+-- (rendered as a sub-header per profession + its own grid). The UI auto-detects
+-- the shape, so flat and grouped phases can coexist.
 ns.PhaseCraftedEpics = {
-    -- Phase 1 — Blackfathom Deeps era. User-supplied IDs (range matches P1 loot;
-    -- confirm phase in-client).
+    -- Phase 1 — Blackfathom Deeps era. Grouped by profession (source: PHASE_1.md).
     [1] = {
-        210794,
-        210795,
-        211423,
-        211502,
+        { profession = "Blacksmithing",  items = { 210794, 210773 } },
+        { profession = "Leatherworking", items = { 211423, 211502 } },
+        { profession = "Tailoring",      items = { 210795, 210781, 215365, 215366 } },
     },
 
-    -- Phase 2 — Gnomeregan era. User-supplied IDs.
+    -- Phase 2 — Gnomeregan era. Grouped by profession (user-supplied).
     [2] = {
-        215111,  -- Gneuro-Linked Arcano-Filament Monocle
-        215163,
-        215381,
-        215166,
-        215114,
-        215382,
-        215167,
-        215161,
-        215115,
-        213390,  -- Whirling Truesilver Gearwall
-        215138,
-        215129,
-        215141,
+        { profession = "Alchemy",        items = { 215163 } },
+        { profession = "Blacksmithing",  items = { 215167, 215161 } },
+        { profession = "Enchanting",     items = { 215138, 215129 } },
+        { profession = "Engineering",    items = { 215432, 215431, 215156 } },
+        { profession = "Leatherworking", items = { 215166, 215114, 215381, 215382 } },
+        { profession = "Tailoring",      items = { 215111 } },
+    },
+
+    -- Phase 3 — Sunken Temple era. Grouped by profession (user-supplied), so the
+    -- panel renders a sub-header per profession above its crafted epics.
+    [3] = {
+        { profession = "Alchemy",        items = { 222952, 221024 } },
+        { profession = "Blacksmithing",  items = { 220738, 220740, 220739 } },
+        { profession = "Enchanting",     items = { 221028, 220792 } },
+        { profession = "Engineering",    items = { 221025, 221026, 221027 } },
+        { profession = "Leatherworking", items = { 220747, 220748, 220745, 220742, 220744, 220743 } },
+        { profession = "Tailoring",      items = { 220749, 220750, 220751 } },
     },
 }
 
