@@ -4,6 +4,21 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.3.2] - 2026-06-24
+
+### Changed
+- **Enforcement is now per-rule and opt-in.** "Relaxed" and "Authentic" are no longer a separate stored switch — the **mode is derived** from which rules are enabled. Turning a rule on (in the guild enforcement config or your personal challenges) is what enforces it; you're "Authentic" exactly when every authentic rule is on. Previously a rule needed *both* Authentic mode and its own toggle, so enabling personal challenges in Relaxed mode looked active but enforced nothing.
+- **Fresh installs now enforce nothing until configured.** All enforcement rules (and auto-unequip) default to **off**; a guild leader enables and broadcasts them, and unsynced members impose no restrictions on their own.
+- **Overview "This Phase" box** no longer shows the "quests unlocking this phase" line.
+
+### Added
+- **Blackrock Eruption (Phase 4 world event) quests are now blocked** when locked below Phase 4 — matching how the Nightmare Incursions are blocked below Phase 3.
+
+### Fixed
+- **Guild leaders could not save or broadcast the enforcement config.** A missing internal helper caused a silent error in the Guild Settings toggles, so the config looked set locally but was never synced ("Set by: —" stuck, no broadcast). The config now commits and broadcasts correctly.
+
+---
+
 ## [0.3.1] - 2026-06-24
 
 ### Added

@@ -15,18 +15,14 @@ for i = ns.MIN_PHASE, ns.MAX_PHASE do phaseValues[i] = ns.Phases[i].name end
 local function notOfficer()      return not Addon:IsOfficer() end
 local function notGuildLeader()  return not Addon:IsGuildLeader() end
 
--- ---- Overview helpers -----------------------------------------------------
--- Number of quests that first unlock at the given phase index.
-local function newQuestCount(phaseIndex)
-    local n = 0
-    if ns.QuestPhases then
-        for _, p in pairs(ns.QuestPhases) do
-            if p == phaseIndex then n = n + 1 end
-        end
-    end
-    return n
+-- Commit a guild-config edit (caller already mutated db.global.ruleset).
+-- Pass msg to print a targeted confirmation instead of the generic ruleset line.
+local function commitGuild(msg)
+    if msg then Addon:Print(msg) end
+    Addon:CommitGuildSettings(msg ~= nil)
 end
 
+-- ---- Overview helpers -----------------------------------------------------
 -- Ordered, de-duplicated list of every instance enterable up to `phaseIndex`
 -- (original casing preserved; ns.Phases[*].allowedInstances is lowercased).
 local function cumulativeInstances(phaseIndex)
@@ -57,8 +53,8 @@ local function bulletList(items, color)
     return table.concat(out, "\n")
 end
 
--- Left-column summary text for the active phase (headline raid, new instances,
--- quest count). Shared by the "This Phase" custom panel widget below.
+-- Left-column summary text for the active phase (headline raid, new instances).
+-- Shared by the "This Phase" custom panel widget below.
 local function phaseSummaryText()
     local idx = Addon:GetActivePhase()
     local d = ns.Phases[idx]
@@ -74,15 +70,6 @@ local function phaseSummaryText()
     local allInstances = cumulativeInstances(idx)
     lines[#lines + 1] = string.format("|cffffd100All available instances (%d):|r", #allInstances)
     lines[#lines + 1] = bulletList(allInstances, "ffffffff")
-    lines[#lines + 1] = ""
-    local nq = newQuestCount(idx)
-    if nq > 0 then
-        lines[#lines + 1] = string.format("|cffffd100Quests unlocking this phase:|r |cff40ff40%d|r", nq)
-    elseif idx == ns.MIN_PHASE then
-        lines[#lines + 1] = "|cff888888All starting-zone quests are available.|r"
-    else
-        lines[#lines + 1] = "|cff888888No phase-gated quests recorded for this phase.|r"
-    end
     return table.concat(lines, "\n")
 end
 
@@ -334,7 +321,7 @@ local options = {
                         local r = Addon:GetRuleset()
                         local d = Addon:GetPhaseData()
                         return string.format("|cffffd100Active:|r %s  |  mode |cff00ff00%s|r  |  level cap %d\n|cffffd100Set by:|r %s    |cffffd100You are:|r %s",
-                            d and d.name or "?", r.mode, d and d.levelCap or 0,
+                            d and d.name or "?", Addon:GetMode(), d and d.levelCap or 0,
                             r.setBy ~= "" and r.setBy or "—",
                             Addon:IsGuildLeader() and "the guild leader"
                                 or (Addon:IsOfficer() and "an officer" or "a member (follows guild config)"))

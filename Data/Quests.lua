@@ -7,8 +7,9 @@ local ADDON, ns = ...
 -- unlocks. A quest is blocked while the active (locked) phase is BELOW that
 -- value — e.g. the Nightmare Incursions (Phase 3) are blocked at phases 1-2.
 --
--- Phase 1 and Phase 4 carry no entries: everything not listed is treated as
--- Phase 1 content, and Phase 4 (level-60 raid release) added no gated quests.
+-- Phase 1 carries no entries: everything not listed is treated as Phase 1
+-- content. Phase 4 (Molten Core, level-60 raid release) gates only its
+-- Blackrock Eruption world event — the rest of its content is open-world leveling.
 --
 -- The per-phase phase.bannedQuests tables in Data/Phases.lua still act as
 -- manual union-style overrides (see ns.QuestBlockedAtPhase below).
@@ -124,6 +125,17 @@ ns.QuestPhases = {
     [81873] = 3,  -- Feralas Mission XVII: Rescue Nerene Brooksinger
     [81874] = 3,  -- Feralas Mission XVIII: Rescue Jamniss Treemender
     [82068] = 3,  -- Fight the Nightmare Incursions
+
+    -- Phase 4 (Molten Core, lvl 60, Blackrock Eruption world event)
+    [84355] = 4,  -- Blackrock Eruption
+    [84349] = 4,  -- Blackrock Eruption
+    [84348] = 4,  -- Blackrock Eruption
+    [84359] = 4,  -- Blackrock Eruption
+    [84351] = 4,  -- Blackrock Eruption
+    [84356] = 4,  -- Blackrock Eruption
+    [84350] = 4,  -- Blackrock Eruption
+    [84360] = 4,  -- Blackrock Eruption
+    [84372] = 4,  -- Blackrock Eruption
 
     -- Phase 5 (BWL + Zul'Gurub, AQ gates / Thunderfury)
     [4788] = 5,  -- The Final Tablets

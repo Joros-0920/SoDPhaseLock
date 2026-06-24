@@ -17,7 +17,10 @@ local INVSLOT_FIRST, INVSLOT_LAST = 1, 19   -- head .. ranged/relic
 local pendingUnequip = {}                    -- slots queued to unequip after combat
 
 local function P()            return Addon:GetPhaseData() end
-local function authentic()    return Addon:IsAuthentic() end
+-- A rule is enforced whenever it is checked — guild enforcement config OR the
+-- player's personal challenges (RuleEnabled ORs them). There is no separate
+-- "authentic mode" gate: enabling the rule IS the intent to enforce it. "Mode"
+-- (relaxed/authentic) is a derived label, not a precondition (see Core.lua).
 local function enabled(rule)  return Addon:RuleEnabled(rule) end
 
 -- ---------------------------------------------------------------------------
@@ -96,9 +99,9 @@ end
 -- period. Leaving (or zoning out) within the grace window clears everything.
 -- ---------------------------------------------------------------------------
 -- Are we currently standing inside a locked (not-yet-unlocked) dungeon/raid?
--- Authentic mode only.
+-- Only when the instance rule is enabled.
 local function inLockedInstance()
-    if not (Addon.db.profile.enabled and authentic() and enabled("instance")) then return false end
+    if not (Addon.db.profile.enabled and enabled("instance")) then return false end
     local inInstance, instanceType = IsInInstance()
     if not inInstance or (instanceType ~= "party" and instanceType ~= "raid") then
         return false
@@ -176,12 +179,12 @@ end
 -- Shared with UI/BagOverlay for bag-slot overlay and tooltip decoration.
 ns.ItemViolatesPhase = itemViolation
 
--- Mode-aware violation check used for auto-unequip and bind-confirm blocking.
--- Authentic + gear rule: full bannedItems + req-level check.
--- All other cases: req-level only (matches the bag overlay indicator).
+-- Violation check used for auto-unequip and bind-confirm blocking.
+-- Gear rule enabled: full bannedItems + req-level check.
+-- Gear rule off: req-level only (matches the bag overlay level-cap indicator).
 local function itemViolatesInMode(itemID, phase)
     if not itemID then return false end
-    if authentic() and enabled("gear") then
+    if enabled("gear") then
         return itemViolation(itemID, phase)
     end
     local reqLevel = select(5, GetItemInfo(itemID))
@@ -210,8 +213,9 @@ function Enforcement:CheckGear()
             end
         end
     end
-    -- Report to guild compliance only in authentic mode (relaxed removal is local).
-    if authentic() and enabled("gear") then
+    -- Report to guild compliance only when the gear rule is enforced (a pure
+    -- level-cap removal with the rule off is local-only).
+    if enabled("gear") then
         self.violations.gear = count
     else
         self.violations.gear = 0
@@ -323,7 +327,7 @@ local function isRuneBroker()
 end
 
 function Enforcement:OnInteractNPC(event)
-    if not (Addon.db.profile.enabled and authentic() and enabled("runebroker")) then return end
+    if not (Addon.db.profile.enabled and enabled("runebroker")) then return end
     if not isRuneBroker() then return end
     if event == "MERCHANT_SHOW" then
         CloseMerchant()
@@ -342,7 +346,7 @@ end
 -- ---------------------------------------------------------------------------
 local profWarned = {}
 function Enforcement:CheckProfessions()
-    if not (Addon.db.profile.enabled and authentic() and enabled("profession")) then
+    if not (Addon.db.profile.enabled and enabled("profession")) then
         self.violations.profession = false
         return
     end
@@ -381,7 +385,7 @@ end
 -- The authentic-mode quest rule toggle is the on/off switch.
 -- ---------------------------------------------------------------------------
 local function isQuestBlocked(questID)
-    if not (Addon.db.profile.enabled and authentic() and enabled("quest")) then return false end
+    if not (Addon.db.profile.enabled and enabled("quest")) then return false end
     return ns.QuestBlockedAtPhase(questID, Addon:GetActivePhase())
 end
 
@@ -445,7 +449,7 @@ end
 -- Scan the quest log for banned quests (e.g. accepted before the lock, or shared
 -- in), abandon them, and report the count to guild compliance.
 function Enforcement:CheckQuestLog()
-    if not (Addon.db.profile.enabled and authentic() and enabled("quest")) then
+    if not (Addon.db.profile.enabled and enabled("quest")) then
         self.violations.quest = 0
         return
     end
@@ -506,7 +510,7 @@ end
 ns.RuneViolatesPhase = runeViolatesPhase
 
 function Enforcement:CheckRune()
-    if not (Addon.db.profile.enabled and authentic() and enabled("rune")) then
+    if not (Addon.db.profile.enabled and enabled("rune")) then
         self.violations.rune = false
         return
     end
@@ -554,7 +558,7 @@ end
 -- clear the pending selection) before it can apply to the slot. Gated on the
 -- guild "block over-phase gear" setting; warn-only when blocking is off.
 function Enforcement:OnRuneCast(arg)
-    if not (Addon.db.profile.enabled and authentic() and enabled("rune")) then return end
+    if not (Addon.db.profile.enabled and enabled("rune")) then return end
     local phase = P()
     if not phase then return end
     local rune = resolveCastRune(arg)

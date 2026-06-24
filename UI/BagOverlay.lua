@@ -26,18 +26,17 @@ local function getItemUnlockPhase(itemID)
 end
 
 -- Returns true if itemID is illegal at the currently active phase.
--- In authentic mode: checks bannedItems + req-level (gear rule must be enabled).
--- In relaxed mode: checks req-level only (pure level-cap indicator, no enforcement).
+-- Gear rule enabled: checks bannedItems + req-level (full enforcement signal).
+-- Gear rule off: checks req-level only (pure level-cap indicator, no enforcement).
 local function isBagViolation(itemID)
     if not itemID then return false end
     if not (Addon.db and Addon.db.profile.enabled) then return false end
     local phase = Addon:GetPhaseData()
     if not phase then return false end
-    if Addon:IsAuthentic() then
-        if not Addon:RuleEnabled("gear") then return false end
+    if Addon:RuleEnabled("gear") then
         return ns.ItemViolatesPhase(itemID, phase)
     else
-        -- Relaxed mode: only flag items whose required level exceeds the phase cap.
+        -- Gear rule off: only flag items whose required level exceeds the phase cap.
         local reqLevel = select(5, GetItemInfo(itemID))
         return reqLevel ~= nil and reqLevel > phase.levelCap
     end

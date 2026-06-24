@@ -64,7 +64,7 @@ local function rulesetPayload()
     return {
         t       = "R",
         phase   = r.phase,
-        mode    = r.mode,
+        mode    = Addon:GetEffectiveMode(),  -- derived; the enforce table is authoritative
         epoch   = r.epoch,
         by      = r.setBy,
         enforce = r.enforce,

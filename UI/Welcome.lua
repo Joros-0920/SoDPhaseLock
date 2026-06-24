@@ -10,21 +10,28 @@ local PANEL_GAP = 20
 
 local AUTHENTIC_RULES = { "instance", "gear", "profession", "quest", "rune", "runebroker" }
 
+-- Choosing a mode is just a shortcut that sets the underlying rules — "mode" itself
+-- is derived from which rules are on (see Core.lua). Relaxed = level cap only;
+-- Authentic = level cap + all authentic rules. A guild leader writes the guild
+-- enforcement config and broadcasts it; everyone else sets their personal challenges.
 local function applyMode(mode, frame)
     Addon.db.profile.seenWelcome = true
-
-    -- Mirror personal challenges to the chosen mode so the compliance roster
-    -- reflects the player's real intent from the start.
     local wantAuthentic = (mode == "authentic")
-    local pc = Addon.db.profile.personalChallenges
-    for _, rule in ipairs(AUTHENTIC_RULES) do
-        pc[rule] = wantAuthentic
-    end
 
-    if Addon:IsOfficer() then
-        Addon:SetRulesetAsOfficer(Addon:GetActivePhase(), mode)
+    if Addon:IsGuildLeader() then
+        local r = Addon:GetRuleset()
+        r.mode = mode                 -- broadcast hint / display seed
+        r.enforce.level = true        -- both modes track the level cap
+        for _, rule in ipairs(AUTHENTIC_RULES) do
+            r.enforce[rule] = wantAuthentic
+        end
+        Addon:CommitGuildSettings()   -- bump epoch + broadcast to the guild
     else
-        Addon:GetRuleset().mode = mode
+        local pc = Addon.db.profile.personalChallenges
+        pc.level = true
+        for _, rule in ipairs(AUTHENTIC_RULES) do
+            pc[rule] = wantAuthentic
+        end
         local e = Addon:GetModule("Enforcement", true)
         if e then e:FullScan() end
         if ns.RefreshOptions then ns.RefreshOptions() end
@@ -145,14 +152,14 @@ local function buildWelcomeFrame()
 
     -- ── Officer / member notice ───────────────────────────────────────────────
     local noticeText
-    if Addon:IsOfficer() then
+    if Addon:IsGuildLeader() then
         noticeText =
-            "|cff00ff00You are an officer.|r Your selection will be set as the " ..
-            "guild's active mode and broadcast to all members."
+            "|cff00ff00You are the guild leader.|r Your selection sets the guild's " ..
+            "enforcement config and is broadcast to all members."
     else
         noticeText =
-            "|cff888888You are a member.|r Your selection sets your local enforcement " ..
-            "mode. Officers control the guild-wide setting and may override this."
+            "|cff888888You are a member.|r Your selection sets your personal challenges. " ..
+            "The guild leader controls the guild-wide config and may add to this."
     end
     local notice = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     notice:SetPoint("BOTTOMLEFT",  f, "BOTTOMLEFT",  20, 22)

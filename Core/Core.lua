@@ -28,16 +28,19 @@ local defaults = {
                 epoch = 0,           -- monotonically increasing; highest wins
                 setBy = "",          -- player name of whoever last set it
                 -- Guild-controlled enforcement config (guild leader tunes these).
+                -- All off by default: nothing is enforced until a guild leader
+                -- explicitly enables rules and broadcasts them. A fresh install (or
+                -- an unsynced member) thus imposes no restrictions on its own.
                 enforce = {
-                    level      = true,
-                    instance   = true,   -- authentic only
-                    gear       = true,   -- authentic only
-                    profession = true,   -- authentic only
-                    quest      = true,   -- authentic only
-                    rune       = true,   -- authentic only
-                    runebroker = true,   -- authentic only: close Rune Broker window on interact
+                    level      = false,
+                    instance   = false,   -- authentic only
+                    gear       = false,   -- authentic only
+                    profession = false,   -- authentic only
+                    quest      = false,   -- authentic only
+                    rune       = false,   -- authentic only
+                    runebroker = false,   -- authentic only: close Rune Broker window on interact
                 },
-                autoUnequip   = true,    -- auto-remove over-phase gear out of combat
+                autoUnequip   = false,   -- auto-remove over-phase gear out of combat
                 instanceGrace = 90,      -- seconds in a locked instance before reporting
                 nextPhaseDate = "",      -- officer-set free-text unlock date, broadcast to all members
             },
@@ -160,8 +163,12 @@ end
 
 function Addon:GetRuleset()       return self.db.global.rulesets[self:GuildKey()] end
 function Addon:GetActivePhase()   return self:GetRuleset().phase end
-function Addon:GetMode()          return self:GetRuleset().mode end
-function Addon:IsAuthentic()      return self:GetRuleset().mode == "authentic" end
+-- "mode" is DERIVED from which rules are enabled, not a stored field: a player is
+-- authentic exactly when every authentic rule is enforced (guild config OR personal
+-- challenges). The stored ruleset.mode is only a broadcast hint / first-run seed.
+-- See GetEffectiveMode below.
+function Addon:GetMode()          return self:GetEffectiveMode() end
+function Addon:IsAuthentic()      return self:GetEffectiveMode() == "authentic" end
 function Addon:GetPhaseData()     return ns.Phases[self:GetRuleset().phase] end
 
 -- Guild-controlled enforcement config (read by Enforcement / BagOverlay).
@@ -216,7 +223,7 @@ function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, ins
     if not silent then
         local data = ns.Phases[r.phase]
         self:Print(string.format("Ruleset is now |cff00ff00%s|r mode, %s (set by %s).",
-            r.mode, data and data.name or ("Phase " .. r.phase), r.setBy))
+            self:GetMode(), data and data.name or ("Phase " .. r.phase), r.setBy))
     end
 
     -- Refresh enforcement & UI against the new ruleset.
@@ -311,7 +318,7 @@ function Addon:HandleSlash(input)
         local r = self:GetRuleset()
         local data = self:GetPhaseData()
         self:Print(string.format("Mode |cff00ff00%s|r | %s | level cap %d | set by %s (epoch %d)",
-            r.mode, data and data.name or "?", data and data.levelCap or 0, r.setBy ~= "" and r.setBy or "—", r.epoch))
+            self:GetMode(), data and data.name or "?", data and data.levelCap or 0, r.setBy ~= "" and r.setBy or "—", r.epoch))
         self:Print(self:IsOfficer() and "You are an officer (can set the phase)." or "You are a member (read-only).")
     elseif input == "roster" then
         if ns.ToggleRoster then ns.ToggleRoster() end
@@ -324,15 +331,15 @@ function Addon:HandleSlash(input)
         local hasData = d and (next(d.bannedItems) ~= nil) or false
         self:Print("|cffffd100Bag overlay diagnostics:|r")
         self:Print(string.format("  enforcement enabled: %s", self.db.profile.enabled and "|cff00ff00yes|r" or "|cffff3030no|r"))
-        self:Print(string.format("  mode: |cff00ff00%s|r  (overlay needs |cffffd100authentic|r)", self:GetMode()))
-        self:Print(string.format("  gear rule: %s", self:RuleEnabled("gear") and "|cff00ff00on|r" or "|cffff3030off|r"))
+        self:Print(string.format("  mode: |cff00ff00%s|r", self:GetMode()))
+        self:Print(string.format("  gear rule: %s  (full bannedItems overlay needs this on)", self:RuleEnabled("gear") and "|cff00ff00on|r" or "|cffff3030off|r"))
         self:Print(string.format("  phase: %s  (banned-item data: %s)", d and d.name or "?",
             hasData and "|cff00ff00present|r" or "|cffff3030none — only items above level cap are flagged|r"))
         if ns.BagDiagnostics then
             local flagged, scanned = ns.BagDiagnostics()
             self:Print(string.format("  bag items scanned: %d, beyond current phase: |cffffd100%d|r", scanned, flagged))
-            if flagged > 0 and not (self:IsAuthentic() and self:RuleEnabled("gear") and self.db.profile.enabled) then
-                self:Print("  |cffff8080Items are flaggable but overlays are gated off — switch to authentic mode (and enable the gear rule).|r")
+            if flagged > 0 and not (self:RuleEnabled("gear") and self.db.profile.enabled) then
+                self:Print("  |cffff8080Items are flaggable but the full overlay is gated off — enable the gear rule.|r")
             end
         end
         -- Bag addon: Baganator replaces the Blizzard bags; report its widget state.
