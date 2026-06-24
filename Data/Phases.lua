@@ -2313,6 +2313,7 @@ ns.Phases = {
         name        = "Phase 2 — Gnomeregan",
         levelCap    = 40,
         raid        = "Gnomeregan",
+        event       = "Blood Moon",
         profCap     = 225,
         instanceUnlocks = {
             "Razorfen Kraul",

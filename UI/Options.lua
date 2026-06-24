@@ -15,11 +15,246 @@ for i = ns.MIN_PHASE, ns.MAX_PHASE do phaseValues[i] = ns.Phases[i].name end
 local function notOfficer()      return not Addon:IsOfficer() end
 local function notGuildLeader()  return not Addon:IsGuildLeader() end
 
--- Commit a guild-config edit (caller already mutated db.global.ruleset).
--- Pass msg to print a targeted confirmation instead of the generic ruleset line.
-local function commitGuild(msg)
-    if msg then Addon:Print(msg) end
-    Addon:CommitGuildSettings(msg ~= nil)
+-- ---- Overview helpers -----------------------------------------------------
+-- Number of quests that first unlock at the given phase index.
+local function newQuestCount(phaseIndex)
+    local n = 0
+    if ns.QuestPhases then
+        for _, p in pairs(ns.QuestPhases) do
+            if p == phaseIndex then n = n + 1 end
+        end
+    end
+    return n
+end
+
+-- Ordered, de-duplicated list of every instance enterable up to `phaseIndex`
+-- (original casing preserved; ns.Phases[*].allowedInstances is lowercased).
+local function cumulativeInstances(phaseIndex)
+    local list, seen = {}, {}
+    for i = ns.MIN_PHASE, phaseIndex do
+        local phase = ns.Phases[i]
+        if phase then
+            for _, name in ipairs(phase.instanceUnlocks) do
+                local key = name:lower()
+                if not seen[key] then
+                    seen[key] = true
+                    list[#list + 1] = name
+                end
+            end
+        end
+    end
+    return list
+end
+
+-- Render a list as colored bullet lines, or a grey "(none)" placeholder.
+local function bulletList(items, color)
+    if not items or #items == 0 then return "|cff888888(none)|r" end
+    color = color or "ffffffff"
+    local out = {}
+    for _, v in ipairs(items) do
+        out[#out + 1] = "|c" .. color .. "\226\128\162|r " .. v
+    end
+    return table.concat(out, "\n")
+end
+
+-- Left-column summary text for the active phase (headline raid, new instances,
+-- quest count). Shared by the "This Phase" custom panel widget below.
+local function phaseSummaryText()
+    local idx = Addon:GetActivePhase()
+    local d = ns.Phases[idx]
+    if not d then return "" end
+    local lines = {}
+    lines[#lines + 1] = "|cffffd100Headline raid:|r " .. (d.raid or "\226\128\148")
+    if d.event then lines[#lines + 1] = "|cffffd100Event:|r " .. d.event end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "|cffffd100Newly unlocked this phase:|r"
+    lines[#lines + 1] = bulletList(d.instanceUnlocks, "ff40ff40")
+    lines[#lines + 1] = ""
+    local nq = newQuestCount(idx)
+    if nq > 0 then
+        lines[#lines + 1] = string.format("|cffffd100Quests unlocking this phase:|r |cff40ff40%d|r", nq)
+    elseif idx == ns.MIN_PHASE then
+        lines[#lines + 1] = "|cff888888All starting-zone quests are available.|r"
+    else
+        lines[#lines + 1] = "|cff888888No phase-gated quests recorded for this phase.|r"
+    end
+    return table.concat(lines, "\n")
+end
+
+-- Left-column summary text for the NEXT phase (Coming Next box).
+local function nextPhaseSummaryText()
+    local nx = ns.Phases[Addon:GetActivePhase() + 1]
+    if not nx then
+        return "|cff00ff00You're on the final phase.|r The Season of Discovery journey is complete \226\128\148 nothing further to unlock."
+    end
+    local out = {}
+    out[#out + 1] = "|cffffd100" .. nx.name .. "|r"
+    local date = Addon:GetNextPhaseDate()
+    if date ~= "" then out[#out + 1] = "|cffffd100Unlocks on:|r " .. date end
+    out[#out + 1] = ""
+    out[#out + 1] = "|cffffd100New raid:|r " .. (nx.raid or "\226\128\148")
+    if nx.event then out[#out + 1] = "|cffffd100New Event:|r " .. nx.event end
+    out[#out + 1] = "|cffffd100New dungeons & raids:|r"
+    out[#out + 1] = bulletList(nx.instanceUnlocks, "ffffd100")
+    out[#out + 1] = string.format(
+        "|cffffd100Raises level cap to|r |cff00ff00%d|r|cffffd100, profession cap to|r |cff00ff00%d|r.",
+        nx.levelCap, nx.profCap)
+    return table.concat(out, "\n")
+end
+
+-- Custom AceGUI widget for the Overview "This Phase" box: a two-column panel
+-- with the phase summary on the left and a "Unique Drops" header + epic-loot icon
+-- grid pinned to the upper-right (in line with the headline raid). Built as one
+-- widget so the columns top-align — AceConfig's flow layout vertically centers
+-- separate side-by-side widgets, which is why the icons can't be done declaratively.
+-- Each icon shows the real item tooltip on hover and links the item into chat on click.
+-- Two registered variants: the active phase ("This Phase") and the next phase
+-- ("Coming Next"). Each carries its own left-text provider (summaryFn) and a
+-- phase-index provider (dropsPhaseFn) for which PhaseRaidDrops list to render.
+local PANEL_WIDGET      = "SoDPhasePanel"
+local PANEL_WIDGET_NEXT = "SoDPhasePanelNext"
+do
+    local AceGUI = LibStub("AceGUI-3.0")
+    local ICON, GAP, LEFT_FRAC, QMARK = 30, 5, 0.58, 134400
+
+    local function iconEnter(self)
+        if not self.itemID then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetHyperlink("item:" .. self.itemID)
+        GameTooltip:Show()
+    end
+    local function iconLeave() GameTooltip:Hide() end
+    local function iconClick(self)
+        local _, link = GetItemInfo(self.itemID)
+        if link and ChatEdit_InsertLink then ChatEdit_InsertLink(link) end
+    end
+    local function makeIcon(parent)
+        local b = CreateFrame("Button", nil, parent)
+        b:SetSize(ICON, ICON)
+        local bg = b:CreateTexture(nil, "BACKGROUND")
+        bg:SetPoint("TOPLEFT", -1, 1); bg:SetPoint("BOTTOMRIGHT", 1, -1)
+        bg:SetColorTexture(0, 0, 0)
+        b.tex = b:CreateTexture(nil, "ARTWORK")
+        b.tex:SetAllPoints()
+        b.tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)  -- trim default icon border
+        b:SetScript("OnEnter", iconEnter)
+        b:SetScript("OnLeave", iconLeave)
+        b:SetScript("OnClick", iconClick)
+        return b
+    end
+
+    -- Right-column sections rendered top-to-bottom: {label, source table}.
+    local SECTIONS = {
+        { label = "|cffffd100Unique Drops|r\n|cff888888Epic raid loot \226\128\148 hover for details.|r",
+          src = "PhaseRaidDrops" },
+        { label = "|cffffd100Crafted Epics|r\n|cff888888Crafted gear \226\128\148 hover for details.|r",
+          src = "PhaseCraftedEpics" },
+        { label = "|cffffd100New Consumes|r\n|cff888888New consumables \226\128\148 hover for details.|r",
+          src = "PhaseNewConsumes" },
+    }
+
+    local function Relayout(self)
+        if self.resizing then return end
+        local frame = self.frame
+        local W = frame.width or frame:GetWidth() or 400
+        local rightX = W * LEFT_FRAC
+        local rightW = math.max(ICON, W - rightX)
+        local per = math.max(1, math.floor((rightW + GAP) / (ICON + GAP)))
+
+        self.left:ClearAllPoints()
+        self.left:SetPoint("TOPLEFT")
+        self.left:SetWidth(math.max(50, rightX - 10))
+        self.left:SetText(self.summaryFn())
+
+        for _, b in ipairs(self.icons) do b:Hide(); b.itemID = nil end
+        for _, h in ipairs(self.headers) do h:Hide(); h:SetText("") end
+
+        local phase = self.dropsPhaseFn()
+        local y, iconN = 0, 0
+        for s = 1, #SECTIONS do
+            local sec = SECTIONS[s]
+            local items = phase and ns[sec.src] and ns[sec.src][phase]
+            if items and #items > 0 then
+                local hdr = self.headers[s]
+                hdr:ClearAllPoints()
+                hdr:SetPoint("TOPLEFT", frame, "TOPLEFT", rightX, -y)
+                hdr:SetWidth(rightW)
+                hdr:SetText(sec.label)
+                hdr:Show()
+                y = y + hdr:GetStringHeight() + 4
+                for i = 1, #items do
+                    iconN = iconN + 1
+                    local b = self.icons[iconN]
+                    if not b then b = makeIcon(frame); self.icons[iconN] = b end
+                    b.itemID = items[i]
+                    b.tex:SetTexture((GetItemIcon and GetItemIcon(items[i])) or QMARK)
+                    local col, row = (i - 1) % per, math.floor((i - 1) / per)
+                    b:ClearAllPoints()
+                    b:SetPoint("TOPLEFT", frame, "TOPLEFT",
+                        rightX + col * (ICON + GAP), -(y + row * (ICON + GAP)))
+                    b:Show()
+                end
+                y = y + math.ceil(#items / per) * (ICON + GAP) + 8
+            end
+        end
+
+        local h = math.max(self.left:GetStringHeight(), y)
+        if h < 1 then h = 1 end
+        self.resizing = true
+        frame:SetHeight(h)
+        frame.height = h
+        self.resizing = nil
+    end
+
+    local methods = {
+        OnAcquire = function(self)
+            self.resizing = true
+            self:SetWidth(400)
+            self.resizing = nil
+            Relayout(self)
+        end,
+        OnRelease = function(self)
+            for _, b in ipairs(self.icons) do b:Hide(); b.itemID = nil end
+        end,
+        OnWidthSet     = function(self) Relayout(self) end,
+        SetText        = function(self) Relayout(self) end,  -- AceConfig description path
+        SetFontObject  = function(self, font) self.left:SetFontObject(font or GameFontHighlight) end,
+        SetImage       = function() end,
+        SetImageSize   = function() end,
+        SetColor       = function() end,
+    }
+
+    -- Register a panel variant bound to its own text + drops-phase providers.
+    local function registerPanel(typeName, summaryFn, dropsPhaseFn)
+        local function Constructor()
+            local frame = CreateFrame("Frame", nil, UIParent)
+            frame:Hide()
+            local left = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            left:SetJustifyH("LEFT"); left:SetJustifyV("TOP")
+            local headers = {}
+            for s = 1, #SECTIONS do
+                local hdr = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+                hdr:SetJustifyH("LEFT"); hdr:SetJustifyV("TOP")
+                headers[s] = hdr
+            end
+            local widget = {
+                frame = frame, type = typeName, left = left, headers = headers, icons = {},
+                summaryFn = summaryFn, dropsPhaseFn = dropsPhaseFn,
+            }
+            for k, v in pairs(methods) do widget[k] = v end
+            frame.obj = widget
+            return AceGUI:RegisterAsWidget(widget)
+        end
+        AceGUI:RegisterWidgetType(typeName, Constructor, 1)
+    end
+
+    registerPanel(PANEL_WIDGET, phaseSummaryText,
+        function() return Addon:GetActivePhase() end)
+    registerPanel(PANEL_WIDGET_NEXT, nextPhaseSummaryText,
+        function()
+            local n = Addon:GetActivePhase() + 1
+            return ns.Phases[n] and n or nil
+        end)
 end
 
 local options = {
@@ -83,6 +318,52 @@ local options = {
                         intro = {
                             type = "description", order = 0, fontSize = "medium",
                             name = "Stack extra restrictions on top of the guild ruleset. Guild-enforced rules are shown checked and cannot be turned off — you can only add to them.",
+                        },
+                    },
+                },
+            },
+        },
+        overview = {
+            type = "group", order = 15, name = "Overview",
+            args = {
+                intro = {
+                    type = "description", order = 0, fontSize = "large",
+                    name = function()
+                        local d = Addon:GetPhaseData()
+                        if not d then return "" end
+                        return string.format(
+                            "|cffffd100%s|r\n\nLevel cap |cff00ff00%d|r    Profession cap |cff00ff00%d|r    Mode |cff00ff00%s|r",
+                            d.name, d.levelCap, d.profCap, Addon:GetMode())
+                    end,
+                },
+                current = {
+                    type = "group", inline = true, order = 10, name = "This Phase",
+                    args = {
+                        panel = {
+                            type = "description", order = 1, fontSize = "medium",
+                            dialogControl = PANEL_WIDGET, width = "full", name = "",
+                        },
+                    },
+                },
+                available = {
+                    type = "group", inline = true, order = 20, name = "All Available Instances",
+                    args = {
+                        body = {
+                            type = "description", order = 1, fontSize = "medium",
+                            name = function()
+                                local list = cumulativeInstances(Addon:GetActivePhase())
+                                return string.format("|cffffd100%d dungeons & raids enterable:|r\n", #list)
+                                    .. bulletList(list, "ffffffff")
+                            end,
+                        },
+                    },
+                },
+                comingNext = {
+                    type = "group", inline = true, order = 30, name = "Coming Next",
+                    args = {
+                        panel = {
+                            type = "description", order = 1, fontSize = "medium",
+                            dialogControl = PANEL_WIDGET_NEXT, width = "full", name = "",
                         },
                     },
                 },
@@ -170,6 +451,15 @@ local options = {
         },
     },
 }
+
+-- Warm the item cache so drop icons/tooltips resolve on first panel open.
+if GetItemInfo then
+    for _, tbl in ipairs({ ns.PhaseRaidDrops, ns.PhaseCraftedEpics, ns.PhaseNewConsumes }) do
+        for _, list in pairs(tbl or {}) do
+            for _, itemID in ipairs(list) do GetItemInfo(itemID) end
+        end
+    end
+end
 
 -- Build the per-rule toggles (guild-leader controlled). Authentic-only rules are
 -- shown but greyed out when the active mode is relaxed.
