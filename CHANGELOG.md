@@ -4,12 +4,23 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.3.0] - 2026-06-23
+
+### Added
+- **Overview tab** in the options panel (between General and Guild Settings): summarizes the active phase — level/profession caps, headline raid, dungeons & raids newly unlocked this phase, count of quests unlocking this phase, the full list of currently enterable instances, and a "Coming Next" preview of the next phase (new raid, new instances, raised caps, and unlock date if set).
+- **Phase loot panel** in the Overview's "This Phase" and "Coming Next" boxes: a two-column panel with the phase summary on the left and stacked loot sections pinned to the upper-right (in line with the headline raid). Each item is an icon that shows the genuine in-game item tooltip on hover and links the item into chat on click. "Coming Next" shows the upcoming phase's loot. Sections, top to bottom:
+  - **Unique Drops** — epic raid loot.
+  - **Crafted Epics** — profession-crafted epics.
+  - **New Consumes** — new consumables.
+  - Seeded for Blackfathom Deeps (P1) and Gnomeregan (P2); data lives in the new `Data/RaidDrops.lua` (`ns.PhaseRaidDrops` / `ns.PhaseCraftedEpics` / `ns.PhaseNewConsumes`).
+- **Per-phase event** (`event` field on `ns.Phases`): shown as an "Event:" line in the This Phase box and a "New Event" line in Coming Next. Phase 2 → Blood Moon.
+
+---
+
 ## [0.2.0] - 2026-06-23
 
 ### Added
 - Quest phase database (`Data/Quests.lua`): a 384-quest phase map (P2–P7) plus the Nightmare Incursions, sourced from Questie.
-- **Overview tab** in the options panel (between General and Guild Settings): summarizes the active phase — level/profession caps, headline raid, dungeons & raids newly unlocked this phase, count of quests unlocking this phase, the full list of currently enterable instances, and a "Coming Next" preview of the next phase (new raid, new instances, raised caps, and unlock date if set).
-- **Unique Drops panel** in the Overview's "This Phase" and "Coming Next" boxes: a two-column panel with the phase summary on the left and a "Unique Drops" header + epic-loot icon grid pinned to the upper-right (in line with the headline raid). Each icon shows the genuine in-game item tooltip on hover and links the item into chat on click. "Coming Next" shows the upcoming phase's drops. Below Unique Drops, a **Crafted Epics** section lists the phase's profession-crafted epics the same way. Seeded for the Blackfathom Deeps (P1) and Gnomeregan (P2) raids; data lives in the new `Data/RaidDrops.lua` (`ns.PhaseRaidDrops` / `ns.PhaseCraftedEpics`).
 
 ### Changed
 - **Quest enforcement is now a hard block** (previously warn-only): declines the accept dialog (`QUEST_DETAIL`), abandons quests that slip in via sharing or auto-accept (`QUEST_ACCEPTED`), and closes the turn-in window (`QUEST_PROGRESS` / `QUEST_COMPLETE`). A full scan also sweeps and abandons any banned quests already in the log. Quest violations are now reported to the compliance roster.
