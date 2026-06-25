@@ -4,6 +4,15 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.4.1] - 2026-06-25
+
+### Changed
+- **"Available Enchants" tab reworked into a character-screen paper doll.** Instead of a cumulative list grouped by slot, the tab now mirrors the in-game character pane: each gear slot is drawn in its real position showing your equipped item's icon. Enchantable slots get a colored outline — **green** when enchanted (with the enchant's name), **red** when enchantable but missing an enchant. Hovering a slot lists every enchant available up to the active phase, with your current one highlighted; clicking links the item into chat.
+- Weapon slots resolve dynamically from the equipped item — Main Hand shows 1H vs 2H weapon enchants, Off Hand shows shield vs weapon enchants.
+- Layout: the two slot columns are a centered block; the weapon row sits beneath with Main Hand under Wrist, Ranged under Trinket 2, and Off Hand centered between them.
+
+---
+
 ## [0.4.0] - 2026-06-25
 
 ### Added
