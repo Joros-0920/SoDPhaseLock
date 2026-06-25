@@ -104,8 +104,9 @@ end
 -- Two registered variants: the active phase ("This Phase") and the next phase
 -- ("Coming Next"). Each carries its own left-text provider (summaryFn) and a
 -- phase-index provider (dropsPhaseFn) for which PhaseRaidDrops list to render.
-local PANEL_WIDGET      = "SoDPhasePanel"
-local PANEL_WIDGET_NEXT = "SoDPhasePanelNext"
+local PANEL_WIDGET          = "SoDPhasePanel"
+local PANEL_WIDGET_NEXT     = "SoDPhasePanelNext"
+local PANEL_WIDGET_ENCHANTS = "SoDPhaseEnchantsPanel"
 do
     local AceGUI = LibStub("AceGUI-3.0")
     local ICON, GAP, LEFT_FRAC, QMARK = 30, 5, 0.58, 134400
@@ -305,6 +306,222 @@ do
             local n = Addon:GetActivePhase() + 1
             return ns.Phases[n] and n or nil
         end)
+
+    -- ---------------------------------------------------------------------
+    -- "Available Enchants" panel: a full-width, slot-grouped spell-icon grid of
+    -- every enchant available up to & including the active phase (cumulative).
+    -- Each icon shows the enchant's spell tooltip on hover and links it on click.
+    -- Mirrors the Overview item grid, but keyed on enchant spell IDs (not items).
+    -- ---------------------------------------------------------------------
+    local function spellTex(id)
+        return (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(id))
+            or (GetSpellTexture and GetSpellTexture(id)) or QMARK
+    end
+    local function spellEnter(self)
+        if not self.spellID then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if GameTooltip.SetSpellByID then
+            GameTooltip:SetSpellByID(self.spellID)
+        elseif self.spellName then
+            GameTooltip:SetText(self.spellName)
+        end
+        GameTooltip:Show()
+    end
+    local function spellLeave() GameTooltip:Hide() end
+    local function spellClick(self)
+        local link = (C_Spell and C_Spell.GetSpellLink and C_Spell.GetSpellLink(self.spellID))
+            or (GetSpellLink and GetSpellLink(self.spellID))
+        if link and ChatEdit_InsertLink then ChatEdit_InsertLink(link) end
+    end
+    local function makeSpellIcon(parent)
+        local b = CreateFrame("Button", nil, parent)
+        b:SetSize(ICON, ICON)
+        local bg = b:CreateTexture(nil, "BACKGROUND")
+        bg:SetPoint("TOPLEFT", -1, 1); bg:SetPoint("BOTTOMRIGHT", 1, -1)
+        bg:SetColorTexture(0, 0, 0)
+        b.tex = b:CreateTexture(nil, "ARTWORK")
+        b.tex:SetAllPoints()
+        b.tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        b:SetScript("OnEnter", spellEnter)
+        b:SetScript("OnLeave", spellLeave)
+        b:SetScript("OnClick", spellClick)
+        return b
+    end
+
+    -- "Current" line for a slot: what the player has equipped there right now and
+    -- whether it's enchanted. The equipped item link's 2nd field is its permanent
+    -- enchant id (0 = none); when enchanted, scan the item tooltip for the green
+    -- enchant line to show which enchant it is. Recomputed each time the panel renders.
+    local scanTip
+    local function currentEnchantLine(label)
+        local invSlot = ns.EnchantSlotInv and ns.EnchantSlotInv[label]
+        if not invSlot then return nil end
+        local link = GetInventoryItemLink and GetInventoryItemLink("player", invSlot)
+        if not link then return "|cff888888Current: nothing equipped|r" end
+        local enchantId = tonumber(link:match("item:%d+:(%d+)") or "")
+        if not enchantId or enchantId == 0 then
+            return "|cffff8080Current: not enchanted|r"
+        end
+        if not scanTip then
+            scanTip = CreateFrame("GameTooltip", "SoDPhaseLockScanTip", nil, "GameTooltipTemplate")
+        end
+        scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+        scanTip:ClearLines()
+        scanTip:SetInventoryItem("player", invSlot)
+        for i = 2, scanTip:NumLines() do
+            local fs = _G["SoDPhaseLockScanTipTextLeft" .. i]
+            local t = fs and fs:GetText()
+            if t then
+                local r, g, b = fs:GetTextColor()
+                if r and g and b and r < 0.2 and g > 0.8 and b < 0.2 then
+                    return "|cff40ff40Current: " .. t .. "|r"
+                end
+            end
+        end
+        return "|cff40ff40Current: enchanted|r"
+    end
+
+    -- Merge ns.PhaseEnchants[1..current] into ordered { label, items = { {id,name},... } }
+    -- groups, de-duplicating by spell id. Slots emit in ns.EnchantSlotOrder; any label
+    -- not listed there is appended after, in first-seen order.
+    local function buildCumulativeEnchants()
+        local current = Addon:GetActivePhase() or 0
+        local bySlot, seenOrder = {}, {}
+        for p = 1, current do
+            local phaseData = ns.PhaseEnchants and ns.PhaseEnchants[p]
+            if phaseData then
+                for _, grp in ipairs(phaseData) do
+                    local label = grp.label or "?"
+                    local bucket = bySlot[label]
+                    if not bucket then
+                        bucket = { items = {}, seen = {} }
+                        bySlot[label] = bucket
+                        seenOrder[#seenOrder + 1] = label
+                    end
+                    for _, e in ipairs(grp.items or {}) do
+                        local id = type(e) == "table" and e[1] or e
+                        if id and not bucket.seen[id] then
+                            bucket.seen[id] = true
+                            bucket.items[#bucket.items + 1] =
+                                { id = id, name = type(e) == "table" and e[2] or nil }
+                        end
+                    end
+                end
+            end
+        end
+        local order, known = {}, {}
+        for _, label in ipairs(ns.EnchantSlotOrder or {}) do order[#order + 1] = label; known[label] = true end
+        for _, label in ipairs(seenOrder) do if not known[label] then order[#order + 1] = label end end
+        local out = {}
+        for _, label in ipairs(order) do
+            local b = bySlot[label]
+            if b and #b.items > 0 then out[#out + 1] = { label = label, items = b.items } end
+        end
+        return out
+    end
+
+    local function RelayoutEnchants(self)
+        if self.resizing then return end
+        local frame = self.frame
+        local W = frame.width or frame:GetWidth() or 400
+        local per = math.max(1, math.floor((W + GAP) / (ICON + GAP)))
+
+        for _, b in ipairs(self.icons) do b:Hide(); b.spellID = nil end
+        for _, h in ipairs(self.subheaders) do h:Hide(); h:SetText("") end
+        for _, h in ipairs(self.curlines) do h:Hide(); h:SetText("") end
+
+        local groups = buildCumulativeEnchants()
+        if #groups == 0 then
+            self.left:ClearAllPoints()
+            self.left:SetPoint("TOPLEFT")
+            self.left:SetWidth(W)
+            self.left:SetText("|cff888888Enchant data pending for this phase.|r")
+            self.left:Show()
+            local h = math.max(1, self.left:GetStringHeight())
+            self.resizing = true; frame:SetHeight(h); frame.height = h; self.resizing = nil
+            return
+        end
+        self.left:SetText(""); self.left:Hide()
+
+        local y, iconN, subN, curN = 0, 0, 0, 0
+        local function layoutIcons(list)
+            for i = 1, #list do
+                iconN = iconN + 1
+                local b = self.icons[iconN]
+                if not b then b = makeSpellIcon(frame); self.icons[iconN] = b end
+                b.spellID = list[i].id
+                b.spellName = list[i].name
+                b.tex:SetTexture(spellTex(list[i].id))
+                local col, row = (i - 1) % per, math.floor((i - 1) / per)
+                b:ClearAllPoints()
+                b:SetPoint("TOPLEFT", frame, "TOPLEFT",
+                    col * (ICON + GAP), -(y + row * (ICON + GAP)))
+                b:Show()
+            end
+            y = y + math.ceil(#list / per) * (ICON + GAP) + 8
+        end
+
+        for g = 1, #groups do
+            subN = subN + 1
+            local sh = self.subheaders[subN]
+            if not sh then sh = makeSubheader(frame); self.subheaders[subN] = sh end
+            sh:ClearAllPoints()
+            sh:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -y)
+            sh:SetWidth(W)
+            sh:SetText("|cffffd100" .. groups[g].label .. "|r")
+            sh:Show()
+            y = y + sh:GetStringHeight() + 2
+
+            local cur = currentEnchantLine(groups[g].label)
+            if cur then
+                curN = curN + 1
+                local cl = self.curlines[curN]
+                if not cl then cl = makeSubheader(frame); self.curlines[curN] = cl end
+                cl:ClearAllPoints()
+                cl:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -y)
+                cl:SetWidth(W)
+                cl:SetText(cur)
+                cl:Show()
+                y = y + cl:GetStringHeight() + 3
+            end
+
+            layoutIcons(groups[g].items)
+        end
+
+        local h = math.max(1, y)
+        self.resizing = true; frame:SetHeight(h); frame.height = h; self.resizing = nil
+    end
+
+    local enchMethods = {
+        OnAcquire = function(self)
+            self.resizing = true; self:SetWidth(400); self.resizing = nil
+            RelayoutEnchants(self)
+        end,
+        OnRelease = function(self)
+            for _, b in ipairs(self.icons) do b:Hide(); b.spellID = nil end
+        end,
+        OnWidthSet    = function(self) RelayoutEnchants(self) end,
+        SetText       = function(self) RelayoutEnchants(self) end,  -- AceConfig description path
+        SetFontObject = function(self, font) self.left:SetFontObject(font or GameFontHighlight) end,
+        SetImage      = function() end,
+        SetImageSize  = function() end,
+        SetColor      = function() end,
+    }
+
+    local function EnchantsConstructor()
+        local frame = CreateFrame("Frame", nil, UIParent)
+        frame:Hide()
+        local left = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        left:SetJustifyH("LEFT"); left:SetJustifyV("TOP")
+        local widget = {
+            frame = frame, type = PANEL_WIDGET_ENCHANTS, left = left,
+            subheaders = {}, curlines = {}, icons = {},
+        }
+        for k, v in pairs(enchMethods) do widget[k] = v end
+        frame.obj = widget
+        return AceGUI:RegisterAsWidget(widget)
+    end
+    AceGUI:RegisterWidgetType(PANEL_WIDGET_ENCHANTS, EnchantsConstructor, 1)
 end
 
 local options = {
@@ -403,6 +620,25 @@ local options = {
                             dialogControl = PANEL_WIDGET_NEXT, width = "full", name = "",
                         },
                     },
+                },
+            },
+        },
+        enchants = {
+            type = "group", order = 17, name = "Available Enchants",
+            args = {
+                intro = {
+                    type = "description", order = 0, fontSize = "large",
+                    name = function()
+                        local d = Addon:GetPhaseData()
+                        if not d then return "" end
+                        return string.format(
+                            "|cffffd100Available Enchants|r — %s\n|cff888888All enchanting recipes usable up to this phase, by gear slot — hover for details, click to link.|r",
+                            d.name)
+                    end,
+                },
+                panel = {
+                    type = "description", order = 10,
+                    dialogControl = PANEL_WIDGET_ENCHANTS, width = "full", name = "",
                 },
             },
         },

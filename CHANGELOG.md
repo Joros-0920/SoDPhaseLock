@@ -4,6 +4,18 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.4.0] - 2026-06-25
+
+### Added
+- **New "Available Enchants" tab.** Shows, grouped by gear slot, every enchanting recipe usable **up to and including the active phase** (cumulative across phases). Each enchant is an icon — hover for the in-game spell tooltip, click to link it into chat.
+- **Per-slot "Current" line.** Each slot shows what you have equipped there and its enchant: green `Current: <enchant>` when enchanted, red `Current: not enchanted`, or grey `Current: nothing equipped`. Reads your equipped item and (when enchanted) the item's tooltip, so it works for any enchant.
+- **Enchant data (`Data/Enchants.lua`)** for Phases 1–3 across Cloak, Chest, Bracer, Gloves, Boots, Shield, Weapon, and 2H Weapon, sourced from the Wowhead Classic enchanting recipe list and bucketed by required skill against the phase profession caps (≤150 → P1, 151–225 → P2, 226–300 → P3).
+
+### Notes
+- Phase buckets for borderline (~225-skill) "Greater" enchants are best-effort and may shift a phase once verified in-client; phases 4+ are not yet seeded.
+
+---
+
 ## [0.3.2] - 2026-06-24
 
 ### Changed
