@@ -308,60 +308,46 @@ do
         end)
 
     -- ---------------------------------------------------------------------
-    -- "Available Enchants" panel: a full-width, slot-grouped spell-icon grid of
-    -- every enchant available up to & including the active phase (cumulative).
-    -- Each icon shows the enchant's spell tooltip on hover and links it on click.
-    -- Mirrors the Overview item grid, but keyed on enchant spell IDs (not items).
+    -- "Available Enchants" panel: a character-screen paper doll. Each gear slot is
+    -- drawn in its real character-pane position, showing the equipped item's icon.
+    -- Enchantable slots get a coloured outline (green = enchanted, red = needs an
+    -- enchant) and a label with the current enchant; hovering one lists every
+    -- enchant available up to the active phase. Recomputed each time it renders.
     -- ---------------------------------------------------------------------
-    local function spellTex(id)
-        return (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(id))
-            or (GetSpellTexture and GetSpellTexture(id)) or QMARK
-    end
-    local function spellEnter(self)
-        if not self.spellID then return end
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        if GameTooltip.SetSpellByID then
-            GameTooltip:SetSpellByID(self.spellID)
-        elseif self.spellName then
-            GameTooltip:SetText(self.spellName)
-        end
-        GameTooltip:Show()
-    end
-    local function spellLeave() GameTooltip:Hide() end
-    local function spellClick(self)
-        local link = (C_Spell and C_Spell.GetSpellLink and C_Spell.GetSpellLink(self.spellID))
-            or (GetSpellLink and GetSpellLink(self.spellID))
-        if link and ChatEdit_InsertLink then ChatEdit_InsertLink(link) end
-    end
-    local function makeSpellIcon(parent)
-        local b = CreateFrame("Button", nil, parent)
-        b:SetSize(ICON, ICON)
-        local bg = b:CreateTexture(nil, "BACKGROUND")
-        bg:SetPoint("TOPLEFT", -1, 1); bg:SetPoint("BOTTOMRIGHT", 1, -1)
-        bg:SetColorTexture(0, 0, 0)
-        b.tex = b:CreateTexture(nil, "ARTWORK")
-        b.tex:SetAllPoints()
-        b.tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-        b:SetScript("OnEnter", spellEnter)
-        b:SetScript("OnLeave", spellLeave)
-        b:SetScript("OnClick", spellClick)
-        return b
-    end
+    local DOLL_ICON = 28
 
-    -- "Current" line for a slot: what the player has equipped there right now and
-    -- whether it's enchanted. The equipped item link's 2nd field is its permanent
-    -- enchant id (0 = none); when enchanted, scan the item tooltip for the green
-    -- enchant line to show which enchant it is. Recomputed each time the panel renders.
+    -- Standard character-pane layout. `inv` = INVSLOT id; `empty` = Blizzard
+    -- empty-slot texture suffix; `ench` = enchant slot label (or "weapon"/"offhand"
+    -- for the dynamic weapon slots, resolved from the equipped item type).
+    local DOLL_LEFT = {
+        { name = "Head",     inv = 1,  empty = "Head" },
+        { name = "Neck",     inv = 2,  empty = "Neck" },
+        { name = "Shoulder", inv = 3,  empty = "Shoulder" },
+        { name = "Back",     inv = 15, empty = "Chest",  ench = "Cloak" },
+        { name = "Chest",    inv = 5,  empty = "Chest",  ench = "Chest" },
+        { name = "Shirt",    inv = 4,  empty = "Shirt" },
+        { name = "Tabard",   inv = 19, empty = "Tabard" },
+        { name = "Wrist",    inv = 9,  empty = "Wrist",  ench = "Bracer" },
+    }
+    local DOLL_RIGHT = {
+        { name = "Hands",     inv = 10, empty = "Hands",   ench = "Gloves" },
+        { name = "Waist",     inv = 6,  empty = "Waist" },
+        { name = "Legs",      inv = 7,  empty = "Legs" },
+        { name = "Feet",      inv = 8,  empty = "Feet",    ench = "Boots" },
+        { name = "Finger 1",  inv = 11, empty = "Finger" },
+        { name = "Finger 2",  inv = 12, empty = "Finger" },
+        { name = "Trinket 1", inv = 13, empty = "Trinket" },
+        { name = "Trinket 2", inv = 14, empty = "Trinket" },
+    }
+    local DOLL_BOTTOM = {
+        { name = "Main Hand", inv = 16, empty = "MainHand",      ench = "weapon" },
+        { name = "Off Hand",  inv = 17, empty = "SecondaryHand", ench = "offhand" },
+        { name = "Ranged",    inv = 18, empty = "Ranged" },
+    }
+
+    -- Read the green permanent-enchant line off an equipped item's tooltip.
     local scanTip
-    local function currentEnchantLine(label)
-        local invSlot = ns.EnchantSlotInv and ns.EnchantSlotInv[label]
-        if not invSlot then return nil end
-        local link = GetInventoryItemLink and GetInventoryItemLink("player", invSlot)
-        if not link then return "|cff888888Current: nothing equipped|r" end
-        local enchantId = tonumber(link:match("item:%d+:(%d+)") or "")
-        if not enchantId or enchantId == 0 then
-            return "|cffff8080Current: not enchanted|r"
-        end
+    local function scanEnchantName(invSlot)
         if not scanTip then
             scanTip = CreateFrame("GameTooltip", "SoDPhaseLockScanTip", nil, "GameTooltipTemplate")
         end
@@ -373,12 +359,83 @@ do
             local t = fs and fs:GetText()
             if t then
                 local r, g, b = fs:GetTextColor()
-                if r and g and b and r < 0.2 and g > 0.8 and b < 0.2 then
-                    return "|cff40ff40Current: " .. t .. "|r"
+                if r and g and b and r < 0.2 and g > 0.8 and b < 0.2 then return t end
+            end
+        end
+        return nil
+    end
+
+    -- Resolve a slot's enchant label, resolving the dynamic weapon slots from the
+    -- equipped item type (2H vs 1H weapon; shield vs off-hand weapon vs held).
+    local function resolveEnchLabel(slot, link)
+        local e = slot.ench
+        if not e or (e ~= "weapon" and e ~= "offhand") then return e end
+        local loc = link and select(9, GetItemInfo(link)) or nil
+        if e == "weapon" then
+            if loc == "INVTYPE_2HWEAPON" then return "2H Weapon" end
+            return "Weapon"               -- default/empty main hand
+        else -- off-hand
+            if loc == "INVTYPE_SHIELD" then return "Shield" end
+            if loc == "INVTYPE_WEAPON" or loc == "INVTYPE_WEAPONOFFHAND" then return "Weapon" end
+            return nil                    -- held-in-off-hand / empty: not enchantable
+        end
+    end
+
+    local function dollEnter(self)
+        local info = self.info
+        if not info then return end
+        if not info.enchLabel then
+            if info.link then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetInventoryItem("player", info.inv)
+                GameTooltip:Show()
+            end
+            return
+        end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(info.name, 1, 0.82, 0)
+        GameTooltip:AddLine(info.itemName or "Nothing equipped",
+            info.itemName and 1 or 0.6, info.itemName and 1 or 0.6, info.itemName and 1 or 0.6)
+        if info.enchanted then
+            GameTooltip:AddLine("Current: " .. (info.curName or "enchanted"), 0.25, 1, 0.25, true)
+        elseif info.link then
+            GameTooltip:AddLine("Not enchanted", 1, 0.4, 0.4)
+        end
+        if info.avail and #info.avail > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Available up to this phase:", 1, 0.82, 0)
+            for _, nm in ipairs(info.avail) do
+                if info.curName and nm:find(info.curName, 1, true) then
+                    GameTooltip:AddLine("  " .. nm, 0.25, 1, 0.25)
+                else
+                    GameTooltip:AddLine("  " .. nm, 0.8, 0.8, 0.8)
                 end
             end
         end
-        return "|cff40ff40Current: enchanted|r"
+        GameTooltip:Show()
+    end
+    local function dollLeave() GameTooltip:Hide() end
+    local function dollClick(self)
+        if self.info and self.info.link and ChatEdit_InsertLink then
+            ChatEdit_InsertLink(self.info.link)
+        end
+    end
+    local function makeDollSlot(parent)
+        local b = CreateFrame("Button", nil, parent)
+        b:SetSize(DOLL_ICON, DOLL_ICON)
+        b.bg = b:CreateTexture(nil, "BACKGROUND")
+        b.bg:SetPoint("TOPLEFT", -2, 2); b.bg:SetPoint("BOTTOMRIGHT", 2, -2)
+        b.bg:SetColorTexture(0, 0, 0)
+        b.tex = b:CreateTexture(nil, "ARTWORK")
+        b.tex:SetAllPoints()
+        b.tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        b.label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        b.label:SetJustifyV("MIDDLE")
+        b:SetScript("OnEnter", dollEnter)
+        b:SetScript("OnLeave", dollLeave)
+        b:SetScript("OnClick", dollClick)
+        return b
     end
 
     -- Merge ns.PhaseEnchants[1..current] into ordered { label, items = { {id,name},... } }
@@ -420,75 +477,119 @@ do
         return out
     end
 
+    -- Cumulative available-enchant names keyed by slot label (for the hover list).
+    local function buildCumulativeByLabel()
+        local out = {}
+        for _, grp in ipairs(buildCumulativeEnchants()) do
+            local names = {}
+            for _, it in ipairs(grp.items) do
+                names[#names + 1] = it.name or ("Spell " .. tostring(it.id))
+            end
+            out[grp.label] = names
+        end
+        return out
+    end
+
+    -- Populate one paper-doll slot from the live equipped item + enchant state.
+    local function fillDollSlot(b, slot, availByLabel)
+        local link = GetInventoryItemLink and GetInventoryItemLink("player", slot.inv)
+        local tex  = GetInventoryItemTexture and GetInventoryItemTexture("player", slot.inv)
+        b.tex:SetTexture(tex or ("Interface\\PaperDoll\\UI-PaperDoll-Slot-" .. slot.empty))
+
+        local enchLabel = resolveEnchLabel(slot, link)
+        local enchanted, curName
+        if enchLabel and link then
+            local enchId = tonumber(link:match("item:%d+:(%d+)") or "")
+            if enchId and enchId ~= 0 then
+                enchanted = true
+                curName = scanEnchantName(slot.inv)
+            end
+        end
+
+        if not enchLabel then
+            b.bg:SetColorTexture(0, 0, 0)
+        elseif not link then
+            b.bg:SetColorTexture(0.3, 0.3, 0.3)
+        elseif enchanted then
+            b.bg:SetColorTexture(0.15, 0.8, 0.15)
+        else
+            b.bg:SetColorTexture(0.85, 0.2, 0.2)
+        end
+
+        local itemName = link and (GetItemInfo(link)) or nil
+        b.info = {
+            name = slot.name, inv = slot.inv, link = link, itemName = itemName,
+            enchLabel = enchLabel, enchanted = enchanted, curName = curName,
+            avail = enchLabel and availByLabel[enchLabel] or nil,
+        }
+
+        local txt = "|cffffffff" .. slot.name .. "|r"
+        if enchLabel then
+            if enchanted then
+                txt = txt .. "\n|cff40ff40" .. (curName or "Enchanted") .. "|r"
+            elseif link then
+                txt = txt .. "\n|cffff6060Not enchanted|r"
+            else
+                txt = txt .. "\n|cff888888\226\128\148|r"
+            end
+        end
+        b.label:SetText(txt)
+    end
+
     local function RelayoutEnchants(self)
         if self.resizing then return end
         local frame = self.frame
         local W = frame.width or frame:GetWidth() or 400
-        local per = math.max(1, math.floor((W + GAP) / (ICON + GAP)))
 
-        for _, b in ipairs(self.icons) do b:Hide(); b.spellID = nil end
-        for _, h in ipairs(self.subheaders) do h:Hide(); h:SetText("") end
-        for _, h in ipairs(self.curlines) do h:Hide(); h:SetText("") end
+        for _, b in ipairs(self.slots) do b:Hide(); b.info = nil; b.label:Hide() end
 
-        local groups = buildCumulativeEnchants()
-        if #groups == 0 then
-            self.left:ClearAllPoints()
-            self.left:SetPoint("TOPLEFT")
-            self.left:SetWidth(W)
-            self.left:SetText("|cff888888Enchant data pending for this phase.|r")
-            self.left:Show()
-            local h = math.max(1, self.left:GetStringHeight())
-            self.resizing = true; frame:SetHeight(h); frame.height = h; self.resizing = nil
-            return
-        end
-        self.left:SetText(""); self.left:Hide()
+        local availByLabel = buildCumulativeByLabel()
+        local ROW_H  = DOLL_ICON + 10
+        -- Two fixed-width columns (icon + label) as one block, horizontally
+        -- centered in the panel.
+        local COLGAP = 40
+        local colW   = math.min(230, (W - COLGAP) / 2)
+        local blockW = colW * 2 + COLGAP
+        local x0     = math.max(0, (W - blockW) / 2)
+        local rightX = x0 + colW + COLGAP
+        local n      = 0
 
-        local y, iconN, subN, curN = 0, 0, 0, 0
-        local function layoutIcons(list)
-            for i = 1, #list do
-                iconN = iconN + 1
-                local b = self.icons[iconN]
-                if not b then b = makeSpellIcon(frame); self.icons[iconN] = b end
-                b.spellID = list[i].id
-                b.spellName = list[i].name
-                b.tex:SetTexture(spellTex(list[i].id))
-                local col, row = (i - 1) % per, math.floor((i - 1) / per)
-                b:ClearAllPoints()
-                b:SetPoint("TOPLEFT", frame, "TOPLEFT",
-                    col * (ICON + GAP), -(y + row * (ICON + GAP)))
-                b:Show()
+        local function place(slot, x, y, textW, below)
+            n = n + 1
+            local b = self.slots[n]
+            if not b then b = makeDollSlot(frame); self.slots[n] = b end
+            fillDollSlot(b, slot, availByLabel)
+            b:ClearAllPoints(); b.label:ClearAllPoints()
+            if below then
+                b:SetPoint("TOP", frame, "TOPLEFT", x, -y)
+                b.label:SetPoint("TOP", b, "BOTTOM", 0, -2)
+                b.label:SetJustifyH("CENTER")
+            else
+                b:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+                b.label:SetPoint("LEFT", b, "RIGHT", 6, 0)
+                b.label:SetJustifyH("LEFT")
             end
-            y = y + math.ceil(#list / per) * (ICON + GAP) + 8
+            b.label:SetWidth(textW)
+            b.label:Show(); b:Show()
         end
 
-        for g = 1, #groups do
-            subN = subN + 1
-            local sh = self.subheaders[subN]
-            if not sh then sh = makeSubheader(frame); self.subheaders[subN] = sh end
-            sh:ClearAllPoints()
-            sh:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -y)
-            sh:SetWidth(W)
-            sh:SetText("|cffffd100" .. groups[g].label .. "|r")
-            sh:Show()
-            y = y + sh:GetStringHeight() + 2
-
-            local cur = currentEnchantLine(groups[g].label)
-            if cur then
-                curN = curN + 1
-                local cl = self.curlines[curN]
-                if not cl then cl = makeSubheader(frame); self.curlines[curN] = cl end
-                cl:ClearAllPoints()
-                cl:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -y)
-                cl:SetWidth(W)
-                cl:SetText(cur)
-                cl:Show()
-                y = y + cl:GetStringHeight() + 3
-            end
-
-            layoutIcons(groups[g].items)
+        for i, slot in ipairs(DOLL_LEFT) do
+            place(slot, x0, (i - 1) * ROW_H, colW - DOLL_ICON - 12, false)
+        end
+        for i, slot in ipairs(DOLL_RIGHT) do
+            place(slot, rightX, (i - 1) * ROW_H, colW - DOLL_ICON - 12, false)
         end
 
-        local h = math.max(1, y)
+        local cols = math.max(#DOLL_LEFT, #DOLL_RIGHT) * ROW_H + 14
+        -- Weapon row: Main Hand under Wrist (left column), Ranged under Trinket 2
+        -- (right column), Off Hand centered between them.
+        local half = DOLL_ICON / 2
+        local wtextW = colW / 2 - 8
+        place(DOLL_BOTTOM[1], x0 + half, cols, wtextW, true)                    -- Main Hand
+        place(DOLL_BOTTOM[2], (x0 + rightX) / 2 + half, cols, wtextW, true)     -- Off Hand
+        place(DOLL_BOTTOM[3], rightX + half, cols, wtextW, true)                -- Ranged
+
+        local h = cols + DOLL_ICON + 34
         self.resizing = true; frame:SetHeight(h); frame.height = h; self.resizing = nil
     end
 
@@ -498,11 +599,11 @@ do
             RelayoutEnchants(self)
         end,
         OnRelease = function(self)
-            for _, b in ipairs(self.icons) do b:Hide(); b.spellID = nil end
+            for _, b in ipairs(self.slots) do b:Hide(); b.info = nil; b.label:Hide() end
         end,
         OnWidthSet    = function(self) RelayoutEnchants(self) end,
         SetText       = function(self) RelayoutEnchants(self) end,  -- AceConfig description path
-        SetFontObject = function(self, font) self.left:SetFontObject(font or GameFontHighlight) end,
+        SetFontObject = function() end,
         SetImage      = function() end,
         SetImageSize  = function() end,
         SetColor      = function() end,
@@ -511,11 +612,8 @@ do
     local function EnchantsConstructor()
         local frame = CreateFrame("Frame", nil, UIParent)
         frame:Hide()
-        local left = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        left:SetJustifyH("LEFT"); left:SetJustifyV("TOP")
         local widget = {
-            frame = frame, type = PANEL_WIDGET_ENCHANTS, left = left,
-            subheaders = {}, curlines = {}, icons = {},
+            frame = frame, type = PANEL_WIDGET_ENCHANTS, slots = {},
         }
         for k, v in pairs(enchMethods) do widget[k] = v end
         frame.obj = widget
@@ -631,10 +729,12 @@ local options = {
                     name = function()
                         local d = Addon:GetPhaseData()
                         if not d then return "" end
-                        return string.format(
-                            "|cffffd100Available Enchants|r — %s\n|cff888888All enchanting recipes usable up to this phase, by gear slot — hover for details, click to link.|r",
-                            d.name)
+                        return string.format("|cffffd100Available Enchants|r — %s", d.name)
                     end,
+                },
+                help = {
+                    type = "description", order = 1, fontSize = "small",
+                    name = "|cff40ff40Green|r|cff888888 = enchanted, |cffff6060red|r|cff888888 = enchantable but missing an enchant.\nHover a slot for every enchant available up to this phase; click to link the item.|r",
                 },
                 panel = {
                     type = "description", order = 10,

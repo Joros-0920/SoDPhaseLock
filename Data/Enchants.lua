@@ -9,14 +9,6 @@ ns.EnchantSlotOrder = {
     "Cloak", "Chest", "Bracer", "Gloves", "Boots", "Shield", "Weapon", "2H Weapon",
 }
 
--- Inventory slot id per enchant slot, used by the tab's "Current" line (what the
--- player has equipped + enchanted right now). Weapon/2H both map to main hand;
--- Shield maps to the off-hand slot. Values are WoW INVSLOT_* ids.
-ns.EnchantSlotInv = {
-    Cloak = 15, Chest = 5, Bracer = 9, Gloves = 10,
-    Boots = 8, Shield = 17, Weapon = 16, ["2H Weapon"] = 16,
-}
-
 -- Enchants NEWLY available, keyed by phase. Each entry: { label = <slot>, items = { {id, name}, ... } }.
 ns.PhaseEnchants = {
     -- Phase 1 — skill <= 150.
