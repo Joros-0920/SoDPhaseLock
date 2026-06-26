@@ -5,8 +5,8 @@ local AceGUI = LibStub("AceGUI-3.0")
 local frame
 
 -- Relative column widths; must sum to 1.0
--- Player | Lvl | Phase | Mode | Status | (kick)
-local COL_W = { 0.24, 0.06, 0.09, 0.12, 0.34, 0.15 }
+-- Player | Lvl | Phase | Mode | XP | Status | (kick)
+local COL_W = { 0.22, 0.06, 0.08, 0.10, 0.10, 0.30, 0.14 }
 
 -- Defined once at load; reused for every kick confirmation
 StaticPopupDialogs["SODPHASELOCK_KICK_CONFIRM"] = {
@@ -26,7 +26,7 @@ local function addHeader(parent)
     local grp = AceGUI:Create("SimpleGroup")
     grp:SetFullWidth(true)
     grp:SetLayout("Flow")
-    local labels = { "Player", "Lvl", "Phase", "Mode", "Status", "" }
+    local labels = { "Player", "Lvl", "Phase", "Mode", "XP", "Status", "" }
     for i, text in ipairs(labels) do
         local lbl = AceGUI:Create("Label")
         lbl:SetRelativeWidth(COL_W[i])
@@ -45,12 +45,19 @@ local function addDataRow(parent, cells, colorCode, playerName)
     for i, text in ipairs(cells) do
         local lbl = AceGUI:Create("Label")
         lbl:SetRelativeWidth(COL_W[i])
-        lbl:SetText(colorCode .. tostring(text) .. "|r")
+        text = tostring(text)
+        -- A cell that carries its own color code (e.g. the XP indicator) is left
+        -- untouched so it keeps that color even on a red, out-of-compliance row.
+        if text:sub(1, 2) == "|c" then
+            lbl:SetText(text)
+        else
+            lbl:SetText(colorCode .. text .. "|r")
+        end
         grp:AddChild(lbl)
     end
 
     local btn = AceGUI:Create("Button")
-    btn:SetRelativeWidth(COL_W[6])
+    btn:SetRelativeWidth(COL_W[7])
     btn:SetText("Kick")
     btn:SetDisabled(not canKick)
     if canKick then
@@ -110,6 +117,7 @@ local function BuildRows()
             tostring(i.level or "?"),
             "P" .. tostring(i.phase or "?"),
             i.mode or "?",
+            i.xpLocked and "|cff40ff40Locked|r" or "|cff808080—|r",
             i.reasons or "OK",
         }, color, e.name)
     end

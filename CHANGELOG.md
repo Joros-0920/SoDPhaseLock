@@ -4,6 +4,17 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.4.2] - 2026-06-25
+
+### Added
+- **XP-lock indicator in the guild compliance roster.** The roster now shows, per member, whether they have **disabled XP gains** (via Grendag Brightbeard) — a green `Locked` in a new "XP" column, or a grey dash when XP is still on. It is detected locally with `IsXPUserDisabled()` and synced over the existing status reports. This is **informational only**: locking XP never marks a member out of compliance and never reddens their row.
+- **Profession proficiency training is now blocked above the phase cap.** When the **"Profession skill cap"** rule is enabled, the trainer can no longer be used to learn a proficiency tier that would raise a profession past the phase's skill cap — at Phase 1 (cap 150) this blocks **Expert** and above, at Phase 2 (cap 225) it blocks **Artisan**. The attempt is refused with a warning instead of charging you and raising your cap.
+
+### Changed
+- **The "you're at the level cap — go disable XP" reminder no longer shows once you've actually disabled XP.** Players who have locked their XP at the cap are no longer nagged; the reminder still appears for anyone at the cap who is still gaining XP.
+
+---
+
 ## [0.4.1] - 2026-06-25
 
 ### Changed

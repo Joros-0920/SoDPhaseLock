@@ -5,6 +5,7 @@ ns.Compliance = Compliance
 
 -- roster[playerName] = {
 --   level, phase, mode, epoch, overLevel, instance, gear, profession,
+--   xpLocked (bool, informational — not a violation),
 --   compliant (bool), reasons (string), updated (GetTime())
 -- }
 Compliance.roster = {}
@@ -38,6 +39,7 @@ function Compliance:Record(sender, data)
         profession = data.vP == 1,
         quest      = data.vQ or 0,
         rune       = data.vR == 1,
+        xpLocked   = data.vX == 1,   -- informational; intentionally excluded from reasons/compliant
         compliant  = (#reasons == 0),
         reasons    = (#reasons == 0) and "OK" or table.concat(reasons, ", "),
         updated    = GetTime(),

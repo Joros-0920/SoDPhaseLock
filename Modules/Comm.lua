@@ -93,6 +93,7 @@ function Comm:SendStatus()
         vP    = v.profession and 1 or 0,
         vQ    = v.quest or 0,
         vR    = v.rune and 1 or 0,
+        vX    = IsXPUserDisabled() and 1 or 0,   -- XP gains disabled at NPC (informational, not a violation)
     })
 end
 

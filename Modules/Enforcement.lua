@@ -62,7 +62,30 @@ function Enforcement:OnEnable()
     for _, ev in ipairs({ "EQUIP_BIND_CONFIRM", "AUTOEQUIP_BIND_CONFIRM", "USE_BIND_CONFIRM" }) do
         pcall(self.RegisterEvent, self, ev, "OnBindConfirm")
     end
+    -- XP gain toggled at the NPC (Grendag Brightbeard). Informational only — push a
+    -- status ping so officers see the change within seconds rather than waiting for
+    -- the next ~60s heartbeat. Event names vary by build; register defensively.
+    for _, ev in ipairs({ "ENABLE_XP_GAIN", "DISABLE_XP_GAIN" }) do
+        pcall(self.RegisterEvent, self, ev, "OnXPToggled")
+    end
+    -- Block training a profession proficiency (Expert/Artisan/Master) that would
+    -- raise the skill past the phase cap. hooksecurefunc only observes and can't
+    -- prevent the purchase, so we wrap the global BuyTrainerService. Trainer
+    -- purchases are not combat-protected, so replacing it is safe (best-effort).
+    if not self.trainerHooked and BuyTrainerService then
+        self.trainerHooked = true
+        local origBuy = BuyTrainerService
+        BuyTrainerService = function(index, ...)
+            if Enforcement:TrainerProficiencyBlocked(index) then return end
+            return origBuy(index, ...)
+        end
+    end
     self:ScheduleTimer("FullScan", 2)
+end
+
+-- XP gain enabled/disabled at the NPC; report the new state immediately.
+function Enforcement:OnXPToggled()
+    if ns.Comm then ns.Comm:SendStatus() end
 end
 
 -- Run every applicable check at once (login, ruleset change, /sodlock scan).
@@ -84,7 +107,8 @@ function Enforcement:CheckLevel()
     local cap = P() and P().levelCap or 60
     local lvl = UnitLevel("player")
     self.violations.overLevel = lvl > cap
-    if lvl >= cap then
+    -- Once the player has disabled XP gains, the reminder is moot — suppress it.
+    if lvl >= cap and not IsXPUserDisabled() then
         Addon:Alert(string.format(
             "You are at the phase level cap (%d). Visit Grendag Brightbead in Ironforge to stop gaining XP.",
             cap), "level")
@@ -344,6 +368,47 @@ end
 -- ---------------------------------------------------------------------------
 -- Professions (authentic only)
 -- ---------------------------------------------------------------------------
+
+-- Each proficiency tier raises a profession's MAX skill to the value below.
+-- Training a tier whose ceiling exceeds the phase cap is blocked at the trainer.
+-- Apprentice (75) / Journeyman (150) never exceed the lowest phase cap (150), so
+-- they are intentionally omitted. Tier words use Blizzard's localized globals
+-- where present, falling back to enUS (locale-fragile — see PROGRESS open items).
+local PROFICIENCY_CEILING = {
+    [EXPERT  or "Expert"]  = 225,
+    [ARTISAN or "Artisan"] = 300,
+    [MASTER  or "Master"]  = 375,
+}
+
+-- If a trainer service name names a blockable proficiency tier, return the max
+-- skill that tier would unlock; otherwise nil.
+local function proficiencyCeiling(serviceName)
+    if not serviceName then return nil end
+    for word, ceiling in pairs(PROFICIENCY_CEILING) do
+        if type(word) == "string" and serviceName:find(word, 1, true) then
+            return ceiling
+        end
+    end
+    return nil
+end
+
+-- True (and warns) when buying trainer service `index` would push a profession
+-- proficiency above the active phase's skill cap. Gated on the "profession" rule.
+function Enforcement:TrainerProficiencyBlocked(index)
+    if not (Addon.db.profile.enabled and enabled("profession")) then return false end
+    if not (index and GetTrainerServiceInfo) then return false end
+    local cap = (P() and P().profCap) or 300
+    local name = GetTrainerServiceInfo(index)
+    local ceiling = proficiencyCeiling(name)
+    if ceiling and ceiling > cap then
+        Addon:Alert(string.format(
+            "%s can't be trained this phase — it would raise your skill past the cap of %d.",
+            name, cap), "proftrain")
+        return true
+    end
+    return false
+end
+
 local profWarned = {}
 function Enforcement:CheckProfessions()
     if not (Addon.db.profile.enabled and enabled("profession")) then
