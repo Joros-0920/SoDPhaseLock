@@ -4,6 +4,20 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.4.3] - 2026-06-27
+
+### Added
+- **Reagent shopping list now reads your bags.** In the Available Enchants tab, each reagent in the shopping list shows how many you carry as `have/need` — **green** when you have enough, **yellow** when you're short. When you have enough of a reagent, the row is **crossed out** (strike-through + dimmed icon) so the materials you still need to buy stand out. Counts update live as your bags change.
+- **New "Off-Hand" enchant slot** for Season of Discovery off-hand-frill enchants (e.g. *Superior Intellect*, *Excellent Spirit*, *Wisdom*); the paper doll surfaces them when a held off-hand item is equipped.
+
+### Changed
+- **Available Enchants data rebuilt from authoritative Wowhead Classic data.** Every enchant's name and reagents were re-sourced directly from Wowhead, expanding coverage to **153 enchants across Phases 1–4 with reagents for all of them** (previously ~90% and Phases 1–3 only). This also corrects several reagent errors in the previous data.
+
+### Notes
+- Phase buckets remain **best-effort** — vanilla enchants are placed by reagent tier and the new SoD-specific enchants provisionally in Phase 4; a few borderline ones may shift once verified in-client. Non-enchant entries from the source list (oils, wands, trinkets, relics, sigils, rods) are intentionally excluded.
+
+---
+
 ## [0.4.2] - 2026-06-25
 
 ### Added

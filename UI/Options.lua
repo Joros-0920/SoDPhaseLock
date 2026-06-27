@@ -377,9 +377,14 @@ do
         else -- off-hand
             if loc == "INVTYPE_SHIELD" then return "Shield" end
             if loc == "INVTYPE_WEAPON" or loc == "INVTYPE_WEAPONOFFHAND" then return "Weapon" end
-            return nil                    -- held-in-off-hand / empty: not enchantable
+            if loc == "INVTYPE_HOLDABLE" then return "Off-Hand" end  -- off-hand frill / tome
+            return nil                    -- empty off-hand: not enchantable
         end
     end
+
+    -- Forward declaration: the right-hand "available enchants + shopping list"
+    -- pane renderer, defined once the data helpers below are in scope.
+    local RenderPane
 
     local function dollEnter(self)
         local info = self.info
@@ -395,8 +400,12 @@ do
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
         GameTooltip:AddLine(info.name, 1, 0.82, 0)
-        GameTooltip:AddLine(info.itemName or "Nothing equipped",
-            info.itemName and 1 or 0.6, info.itemName and 1 or 0.6, info.itemName and 1 or 0.6)
+        if info.itemName then
+            local q = ITEM_QUALITY_COLORS[info.itemQuality or 1]
+            GameTooltip:AddLine(info.itemName, q and q.r or 1, q and q.g or 1, q and q.b or 1)
+        else
+            GameTooltip:AddLine("Nothing equipped", 0.6, 0.6, 0.6)
+        end
         if info.enchanted then
             GameTooltip:AddLine("Current: " .. (info.curName or "enchanted"), 0.25, 1, 0.25, true)
         elseif info.link then
@@ -416,13 +425,20 @@ do
         GameTooltip:Show()
     end
     local function dollLeave() GameTooltip:Hide() end
+    -- Left-click an enchantable slot to drive the right-hand pane; otherwise
+    -- (non-enchantable slot) fall back to linking the equipped item in chat.
     local function dollClick(self)
-        if self.info and self.info.link and ChatEdit_InsertLink then
+        local w = self.widget
+        if w and self.info and self.info.enchLabel then
+            w.selSlot = self.info.enchLabel
+            RenderPane(w)
+        elseif self.info and self.info.link and ChatEdit_InsertLink then
             ChatEdit_InsertLink(self.info.link)
         end
     end
     local function makeDollSlot(parent)
         local b = CreateFrame("Button", nil, parent)
+        b.widget = parent.obj
         b:SetSize(DOLL_ICON, DOLL_ICON)
         b.bg = b:CreateTexture(nil, "BACKGROUND")
         b.bg:SetPoint("TOPLEFT", -2, 2); b.bg:SetPoint("BOTTOMRIGHT", 2, -2)
@@ -432,6 +448,8 @@ do
         b.tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
         b.label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         b.label:SetJustifyV("MIDDLE")
+        -- NB: keep word-wrap ON. The label is multi-line (slot / item / enchant);
+        -- SetWordWrap(false) collapses it to a single truncated line ("Head...").
         b:SetScript("OnEnter", dollEnter)
         b:SetScript("OnLeave", dollLeave)
         b:SetScript("OnClick", dollClick)
@@ -490,6 +508,16 @@ do
         return out
     end
 
+    -- Cumulative available-enchant { id, name } items keyed by slot label
+    -- (for the clickable right-hand pane).
+    local function buildCumulativeItemsByLabel()
+        local out = {}
+        for _, grp in ipairs(buildCumulativeEnchants()) do
+            out[grp.label] = grp.items
+        end
+        return out
+    end
+
     -- Populate one paper-doll slot from the live equipped item + enchant state.
     local function fillDollSlot(b, slot, availByLabel)
         local link = GetInventoryItemLink and GetInventoryItemLink("player", slot.inv)
@@ -516,14 +544,21 @@ do
             b.bg:SetColorTexture(0.85, 0.2, 0.2)
         end
 
-        local itemName = link and (GetItemInfo(link)) or nil
+        local itemName, itemQuality
+        if link then itemName, _, itemQuality = GetItemInfo(link) end
         b.info = {
-            name = slot.name, inv = slot.inv, link = link, itemName = itemName,
+            name = slot.name, inv = slot.inv, link = link,
+            itemName = itemName, itemQuality = itemQuality,
             enchLabel = enchLabel, enchanted = enchanted, curName = curName,
             avail = enchLabel and availByLabel[enchLabel] or nil,
         }
 
         local txt = "|cffffffff" .. slot.name .. "|r"
+        if itemName then
+            local q = ITEM_QUALITY_COLORS[itemQuality or 1]
+            local hex = q and string.format("ff%02x%02x%02x", q.r * 255, q.g * 255, q.b * 255) or "ffffffff"
+            txt = txt .. "\n|c" .. hex .. itemName .. "|r"
+        end
         if enchLabel then
             if enchanted then
                 txt = txt .. "\n|cff40ff40" .. (curName or "Enchanted") .. "|r"
@@ -536,29 +571,311 @@ do
         b.label:SetText(txt)
     end
 
+    -- ---- Right-hand pane: clickable enchant list + reagent shopping list ----
+    local QUESTION_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
+
+    -- Persistent selection: ONE enchant per gear piece (slot label -> enchant
+    -- spellID). Selecting another enchant for the same slot replaces the previous
+    -- one. Module-scoped so it survives slot/enchant changes and the panel being
+    -- closed/reopened within a session (only resets on /reload or logout).
+    local selection = {}
+    -- Left-click toggles: pick this enchant for its slot, or unpick if already set.
+    local function selectionToggle(label, id)
+        if selection[label] == id then selection[label] = nil else selection[label] = id end
+    end
+    local function selectionClear() for k in pairs(selection) do selection[k] = nil end end
+
+    -- Aggregate the reagents of every selected enchant, summing by reagent (keyed
+    -- on itemID, falling back to name). Each gear piece contributes one enchant, so
+    -- counts are summed straight (no per-enchant quantity). Returns an ordered list
+    -- of { id, name, count } plus a count of selections that have no reagent data.
+    local function buildSelectionReagents()
+        local out, index, missing = {}, {}, 0
+        local labels = {}
+        for label in pairs(selection) do labels[#labels + 1] = label end
+        table.sort(labels)
+        for _, label in ipairs(labels) do
+            local reagents = ns.EnchantReagents and ns.EnchantReagents[selection[label]]
+            if reagents then
+                for _, rg in ipairs(reagents) do
+                    local key = rg.id or ("n:" .. tostring(rg.name))
+                    local e = index[key]
+                    if not e then
+                        e = { id = rg.id, name = rg.name, count = 0 }
+                        index[key] = e; out[#out + 1] = e
+                    end
+                    e.count = e.count + (rg.count or 0)
+                end
+            else
+                missing = missing + 1
+            end
+        end
+        return out, missing
+    end
+
+    -- Strip the "Enchant <Slot> - " prefix for the compact list ("Crusader").
+    local function shortEnchName(name)
+        if not name then return "?" end
+        return name:match("%-%s*(.+)$") or name
+    end
+
+    local function enchRowOnClick(self, button)
+        if not self.enchId or not self.slotLabel then return end
+        if button == "RightButton" then
+            if selection[self.slotLabel] == self.enchId then selection[self.slotLabel] = nil end
+        else
+            selectionToggle(self.slotLabel, self.enchId)
+        end
+        if self.widget then RenderPane(self.widget) end
+    end
+    local function enchRowOnEnter(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(self.fullName or "", 1, 0.82, 0)
+        local reagents = self.enchId and ns.EnchantReagents and ns.EnchantReagents[self.enchId]
+        if reagents then
+            for _, rg in ipairs(reagents) do
+                GameTooltip:AddLine(string.format("%dx %s", rg.count or 1, rg.name or "?"), 0.8, 0.8, 0.8)
+            end
+        else
+            GameTooltip:AddLine("Reagents not listed yet", 0.6, 0.6, 0.6)
+        end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Click to choose this enchant for the slot (one per piece)", 0.4, 0.6, 1)
+        GameTooltip:Show()
+    end
+    local function makeEnchRow(w)
+        local r = CreateFrame("Button", nil, w.frame)
+        r.widget = w
+        r:SetHeight(14)
+        r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        r.sel = r:CreateTexture(nil, "BACKGROUND")
+        r.sel:SetAllPoints(); r.sel:SetColorTexture(0.20, 0.40, 0.90, 0.35); r.sel:Hide()
+        r.hl = r:CreateTexture(nil, "HIGHLIGHT")
+        r.hl:SetAllPoints(); r.hl:SetColorTexture(1, 1, 1, 0.10)
+        r.text = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        r.text:SetPoint("LEFT", 3, 0); r.text:SetJustifyH("LEFT"); r.text:SetWordWrap(false)
+        r:SetScript("OnClick", enchRowOnClick)
+        r:SetScript("OnEnter", enchRowOnEnter)
+        r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        return r
+    end
+
+    local function reagentOnEnter(self)
+        if not self.itemId then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetHyperlink("item:" .. self.itemId)
+        GameTooltip:Show()
+    end
+    local function reagentOnLeave() GameTooltip:Hide() end
+    local function reagentOnClick(self)
+        if self.itemId and ChatEdit_InsertLink then
+            local link = select(2, GetItemInfo(self.itemId))
+            if link then ChatEdit_InsertLink(link) end
+        end
+    end
+    local function makeReagentRow(w)
+        local r = CreateFrame("Button", nil, w.frame)
+        r:SetHeight(18)
+        r.icon = r:CreateTexture(nil, "ARTWORK")
+        r.icon:SetSize(16, 16); r.icon:SetPoint("LEFT", 0, 0)
+        r.text = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        r.text:SetPoint("LEFT", r.icon, "RIGHT", 5, 0); r.text:SetJustifyH("LEFT"); r.text:SetWordWrap(false)
+        -- Strike-through line drawn across the text when the player has enough.
+        r.strike = r:CreateTexture(nil, "OVERLAY")
+        r.strike:SetColorTexture(0.4, 1, 0.4, 0.9); r.strike:SetHeight(1); r.strike:Hide()
+        r:SetScript("OnEnter", reagentOnEnter)
+        r:SetScript("OnLeave", reagentOnLeave)
+        r:SetScript("OnClick", reagentOnClick)
+        return r
+    end
+
+    -- Lazily create the pane's header/note fontstrings on the frame.
+    local function paneFontString(w, key, template)
+        if not w[key] then
+            w[key] = w.frame:CreateFontString(nil, "OVERLAY", template)
+            w[key]:SetJustifyH("LEFT"); w[key]:SetWordWrap(true)
+        end
+        return w[key]
+    end
+
+    -- Lazily create the shopping-list "Clear" button.
+    local function ensureClearBtn(w)
+        if w.clearBtn then return w.clearBtn end
+        local b = CreateFrame("Button", nil, w.frame)
+        b:SetSize(40, 14)
+        b.hl = b:CreateTexture(nil, "HIGHLIGHT"); b.hl:SetAllPoints(); b.hl:SetColorTexture(1, 1, 1, 0.10)
+        b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        b.text:SetAllPoints(); b.text:SetJustifyH("RIGHT"); b.text:SetText("|cffff8080Clear|r")
+        b:SetScript("OnClick", function() selectionClear(); RenderPane(w) end)
+        w.clearBtn = b
+        return b
+    end
+
+    local MAX_ENCH_ROWS    = 24
+    local MAX_REAGENT_ROWS = 16
+
+    RenderPane = function(w)
+        local frame, x, top = w.frame, w.paneX or 0, w.paneTop or 0
+        local pw = w.paneW or 200
+        w.enchRows = w.enchRows or {}
+        w.reagentRows = w.reagentRows or {}
+        for _, r in ipairs(w.enchRows) do r:Hide() end
+        for _, r in ipairs(w.reagentRows) do r:Hide() end
+
+        local h1    = paneFontString(w, "h1", "GameFontNormal")
+        local note  = paneFontString(w, "note", "GameFontDisableSmall")
+        local h2    = paneFontString(w, "h2", "GameFontNormal")
+        local empty = paneFontString(w, "emptyNote", "GameFontDisableSmall")
+        h1:Hide(); note:Hide(); h2:Hide(); empty:Hide()
+        if w.clearBtn then w.clearBtn:Hide() end
+
+        -- ---- Top: available enchants for the selected slot (click = add) ----
+        local y = top
+        h1:ClearAllPoints(); h1:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+        h1:SetWidth(pw); h1:Show()
+
+        if not w.selSlot then
+            h1:SetText("Available Enchants")
+            y = y + 18
+            note:ClearAllPoints(); note:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+            note:SetWidth(pw)
+            note:SetText("Click a gear slot on the left to list its enchants, then click one to choose it for that piece. You can pick one enchant per gear piece; the shopping list below totals the reagents.")
+            note:Show()
+            y = y + 64
+        else
+            h1:SetText("|cffffd100" .. w.selSlot .. "|r enchants")
+            y = y + 18
+            local items = (w.availItems and w.availItems[w.selSlot]) or {}
+            local cur = w.curByLabel and w.curByLabel[w.selSlot]
+            local chosen = selection[w.selSlot]
+            local n = 0
+            for _, it in ipairs(items) do
+                if n >= MAX_ENCH_ROWS then break end
+                n = n + 1
+                local r = w.enchRows[n] or makeEnchRow(w)
+                w.enchRows[n] = r
+                r.enchId = it.id; r.fullName = it.name; r.slotLabel = w.selSlot
+                local label = shortEnchName(it.name)
+                local color = "|cffcfcfcf"
+                if cur and it.name and it.name:find(cur, 1, true) then color = "|cff40ff40" end -- equipped
+                r.text:SetText(color .. label .. "|r")
+                r.sel:SetShown(it.id == chosen)
+                r:ClearAllPoints(); r:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+                r:SetSize(pw, 14); r.text:SetWidth(pw - 6)
+                r:Show()
+                y = y + 15
+            end
+            if n == 0 then
+                note:ClearAllPoints(); note:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+                note:SetWidth(pw); note:SetText("No enchants available for this slot yet."); note:Show()
+                y = y + 16
+            end
+        end
+
+        -- ---- Bottom: persistent shopping list (one enchant per gear piece) ----
+        y = y + 12
+        h2:ClearAllPoints(); h2:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+        h2:SetWidth(pw); h2:SetText("Shopping list"); h2:Show()
+        if next(selection) then
+            local clr = ensureClearBtn(w)
+            clr:ClearAllPoints()
+            clr:SetPoint("TOPLEFT", frame, "TOPLEFT", x + pw - 40, -y + 1)
+            clr:Show()
+        end
+        y = y + 18
+
+        if not next(selection) then
+            empty:ClearAllPoints(); empty:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+            empty:SetWidth(pw)
+            empty:SetText("Empty — choose an enchant for a gear piece above.")
+            empty:Show()
+            y = y + 16
+        else
+            local agg, missing = buildSelectionReagents()
+            local m = 0
+            for _, rg in ipairs(agg) do
+                if m >= MAX_REAGENT_ROWS then break end
+                m = m + 1
+                local r = w.reagentRows[m] or makeReagentRow(w)
+                w.reagentRows[m] = r
+                r.itemId = rg.id
+                r.icon:SetTexture((rg.id and GetItemIcon(rg.id)) or QUESTION_ICON)
+                local nm = (rg.id and GetItemInfo(rg.id)) or rg.name or ("Item " .. tostring(rg.id))
+                -- How many the player carries in bags (nil if the reagent has no
+                -- itemID — then we can't query a bag count, so show need only).
+                local have = rg.id and GetItemCount(rg.id) or nil
+                local enough = have ~= nil and have >= rg.count
+                if have ~= nil then
+                    local cc = enough and "|cff40ff40" or "|cffffd100"
+                    r.text:SetText(string.format("|cffffffff%dx|r %s  %s%d/%d|r",
+                        rg.count, nm, cc, have, rg.count))
+                else
+                    r.text:SetText(string.format("|cffffffff%dx|r %s", rg.count, nm))
+                end
+                -- "Cross out" reagents the player already has enough of: dim the
+                -- icon + draw a strike-through across the (visible) text width.
+                r.icon:SetDesaturated(enough); r.icon:SetAlpha(enough and 0.5 or 1)
+                if enough then
+                    r.strike:ClearAllPoints()
+                    r.strike:SetPoint("LEFT", r.text, "LEFT", 0, 0)
+                    r.strike:SetWidth(math.min(r.text:GetStringWidth(), pw - 22))
+                    r.strike:Show()
+                else
+                    r.strike:Hide()
+                end
+                r:ClearAllPoints(); r:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+                r:SetSize(pw, 18); r.text:SetWidth(pw - 22)
+                r:Show()
+                y = y + 19
+            end
+            if missing > 0 then
+                empty:ClearAllPoints(); empty:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+                empty:SetWidth(pw)
+                empty:SetText(string.format("(%d enchant%s in list have no reagent data yet)",
+                    missing, missing == 1 and "" or "s"))
+                empty:Show()
+                y = y + 16
+            end
+        end
+        w.paneBottom = y
+    end
+
     local function RelayoutEnchants(self)
         if self.resizing then return end
         local frame = self.frame
-        local W = frame.width or frame:GetWidth() or 400
+        local W = frame.width or frame:GetWidth() or 560
 
         for _, b in ipairs(self.slots) do b:Hide(); b.info = nil; b.label:Hide() end
 
         local availByLabel = buildCumulativeByLabel()
-        local ROW_H  = DOLL_ICON + 10
-        -- Two fixed-width columns (icon + label) as one block, horizontally
-        -- centered in the panel.
-        local COLGAP = 40
-        local colW   = math.min(230, (W - COLGAP) / 2)
-        local blockW = colW * 2 + COLGAP
-        local x0     = math.max(0, (W - blockW) / 2)
-        local rightX = x0 + colW + COLGAP
-        local n      = 0
+        self.availItems = buildCumulativeItemsByLabel()
+        self.curByLabel = {}
+        local ROW_H  = DOLL_ICON + 12
+        -- Left: the paper doll (two columns) — gets the bulk of the width so the
+        -- per-slot item name + current enchant stay readable beside each icon.
+        -- Right: a slim interaction pane (enchant list + reagent shopping list);
+        -- long reagent names truncate but the row's hover tooltip shows them full.
+        local PANEGAP = 16
+        local paneW   = math.max(150, math.min(185, W * 0.30))
+        local dollW   = math.max(220, W - paneW - PANEGAP)
+        local COLGAP  = 16
+        local colW    = math.max(120, math.min(215, (dollW - COLGAP) / 2))
+        local x0      = 0
+        local rightX  = x0 + colW + COLGAP
+        local n       = 0
+        self.paneX    = W - paneW
+        self.paneW    = paneW
+        self.paneTop  = 0
 
         local function place(slot, x, y, textW, below)
             n = n + 1
             local b = self.slots[n]
             if not b then b = makeDollSlot(frame); self.slots[n] = b end
             fillDollSlot(b, slot, availByLabel)
+            if b.info.enchLabel and b.info.curName then
+                self.curByLabel[b.info.enchLabel] = b.info.curName
+            end
             b:ClearAllPoints(); b.label:ClearAllPoints()
             if below then
                 b:SetPoint("TOP", frame, "TOPLEFT", x, -y)
@@ -589,17 +906,45 @@ do
         place(DOLL_BOTTOM[2], (x0 + rightX) / 2 + half, cols, wtextW, true)     -- Off Hand
         place(DOLL_BOTTOM[3], rightX + half, cols, wtextW, true)                -- Ranged
 
-        local h = cols + DOLL_ICON + 34
-        self.resizing = true; frame:SetHeight(h); frame.height = h; self.resizing = nil
+        local dollH = cols + DOLL_ICON + 34
+
+        -- Reserve enough height for the worst-case pane (largest slot's enchant
+        -- list + a full shopping list) so adding/removing/selecting never grows
+        -- the frame past what the options scroll-frame already allotted.
+        local maxItems = 0
+        for _, items in pairs(self.availItems) do
+            maxItems = math.max(maxItems, math.min(#items, MAX_ENCH_ROWS))
+        end
+        local paneMaxH = self.paneTop + 18 + maxItems * 15      -- h1 + enchant rows
+                       + 12 + 18                                 -- gap + shopping header
+                       + MAX_REAGENT_ROWS * 19 + 16              -- reagent rows + footnote
+
+        self.resizing = true
+        local h = math.max(dollH, paneMaxH)
+        frame:SetHeight(h); frame.height = h
+        self.resizing = nil
+
+        RenderPane(self)
     end
 
     local enchMethods = {
         OnAcquire = function(self)
-            self.resizing = true; self:SetWidth(400); self.resizing = nil
+            self.selSlot = nil
+            self.resizing = true; self:SetWidth(560); self.resizing = nil
             RelayoutEnchants(self)
         end,
         OnRelease = function(self)
+            -- NB: the enchant selection is module-scoped and deliberately NOT
+            -- cleared here, so it survives the panel being closed and reopened.
             for _, b in ipairs(self.slots) do b:Hide(); b.info = nil; b.label:Hide() end
+            for _, r in ipairs(self.enchRows or {}) do r:Hide() end
+            for _, r in ipairs(self.reagentRows or {}) do r:Hide() end
+            if self.h1 then self.h1:Hide() end
+            if self.h2 then self.h2:Hide() end
+            if self.note then self.note:Hide() end
+            if self.emptyNote then self.emptyNote:Hide() end
+            if self.clearBtn then self.clearBtn:Hide() end
+            self.selSlot = nil
         end,
         OnWidthSet    = function(self) RelayoutEnchants(self) end,
         SetText       = function(self) RelayoutEnchants(self) end,  -- AceConfig description path
@@ -617,6 +962,12 @@ do
         }
         for k, v in pairs(enchMethods) do widget[k] = v end
         frame.obj = widget
+        -- Keep the shopping list's bag counts / strike-throughs live as the
+        -- player's bags change (only while shown and something is selected).
+        frame:RegisterEvent("BAG_UPDATE_DELAYED")
+        frame:SetScript("OnEvent", function(self)
+            if self:IsShown() and self.obj and next(selection) then RenderPane(self.obj) end
+        end)
         return AceGUI:RegisterAsWidget(widget)
     end
     AceGUI:RegisterWidgetType(PANEL_WIDGET_ENCHANTS, EnchantsConstructor, 1)
@@ -734,7 +1085,7 @@ local options = {
                 },
                 help = {
                     type = "description", order = 1, fontSize = "small",
-                    name = "|cff40ff40Green|r|cff888888 = enchanted, |cffff6060red|r|cff888888 = enchantable but missing an enchant.\nHover a slot for every enchant available up to this phase; click to link the item.|r",
+                    name = "|cff40ff40Green|r|cff888888 = enchanted, |cffff6060red|r|cff888888 = enchantable but missing an enchant.\nClick a gear slot to list its enchants on the right, then choose one enchant per gear piece. The shopping list totals the reagents for everything you've picked.|r",
                 },
                 panel = {
                     type = "description", order = 10,
