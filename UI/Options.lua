@@ -518,6 +518,45 @@ do
         return out
     end
 
+    -- Set of enchant spell ids first available in the *active* phase, keyed by
+    -- slot label (drives the "Added this phase" sub-header / most-recent grouping).
+    local function buildThisPhaseIds()
+        local current = Addon:GetActivePhase() or 0
+        local out = {}
+        local phaseData = ns.PhaseEnchants and ns.PhaseEnchants[current]
+        if phaseData then
+            for _, grp in ipairs(phaseData) do
+                local label = grp.label or "?"
+                local set = out[label] or {}
+                out[label] = set
+                for _, e in ipairs(grp.items or {}) do
+                    local id = type(e) == "table" and e[1] or e
+                    if id then set[id] = true end
+                end
+            end
+        end
+        return out
+    end
+
+    -- Map of enchant spell id -> the (earliest) phase it first becomes available.
+    -- Drives the "Available earlier" ordering (later phases sorted to the top).
+    local function buildEnchantPhaseById()
+        local current = Addon:GetActivePhase() or 0
+        local out = {}
+        for p = 1, current do
+            local phaseData = ns.PhaseEnchants and ns.PhaseEnchants[p]
+            if phaseData then
+                for _, grp in ipairs(phaseData) do
+                    for _, e in ipairs(grp.items or {}) do
+                        local id = type(e) == "table" and e[1] or e
+                        if id and not out[id] then out[id] = p end
+                    end
+                end
+            end
+        end
+        return out
+    end
+
     -- Populate one paper-doll slot from the live equipped item + enchant state.
     local function fillDollSlot(b, slot, availByLabel)
         local link = GetInventoryItemLink and GetInventoryItemLink("player", slot.inv)
@@ -644,8 +683,8 @@ do
         GameTooltip:AddLine("Click to choose this enchant for the slot (one per piece)", 0.4, 0.6, 1)
         GameTooltip:Show()
     end
-    local function makeEnchRow(w)
-        local r = CreateFrame("Button", nil, w.frame)
+    local function makeEnchRow(w, parent)
+        local r = CreateFrame("Button", nil, parent or w.frame)
         r.widget = w
         r:SetHeight(14)
         r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -712,6 +751,39 @@ do
         return b
     end
 
+    -- Lazily create the scrolling container that holds the selected slot's enchant
+    -- list (+ its "Added this phase" sub-header). Capped to a fraction of the panel
+    -- height by the caller so a long list scrolls instead of pushing the shopping
+    -- list off the panel. Enchant rows + sub-headers are parented to `enchChild`.
+    local enchScrollSeq = 0
+    local function ensureEnchScroll(w)
+        if w.enchScroll then return w.enchScroll, w.enchChild end
+        enchScrollSeq = enchScrollSeq + 1
+        local name = "SoDPhaseLockEnchScroll" .. enchScrollSeq
+        local sf = CreateFrame("ScrollFrame", name, w.frame, "UIPanelScrollFrameTemplate")
+        local child = CreateFrame("Frame", nil, sf)
+        child:SetSize(1, 1)
+        sf:SetScrollChild(child)
+        sf:EnableMouseWheel(true)
+        sf:SetScript("OnMouseWheel", function(self, delta)
+            local maxS = self:GetVerticalScrollRange()
+            local new  = math.min(math.max(self:GetVerticalScroll() - delta * 20, 0), maxS)
+            self:SetVerticalScroll(new)
+        end)
+        w.enchScroll, w.enchChild = sf, child
+        w.enchScrollBar = _G[name .. "ScrollBar"]
+        return sf, child
+    end
+
+    -- Lazily create a fontstring parented to the scroll child (sub-headers).
+    local function paneChildFS(w, key, template)
+        if not w[key] then
+            w[key] = w.enchChild:CreateFontString(nil, "OVERLAY", template)
+            w[key]:SetJustifyH("LEFT"); w[key]:SetWordWrap(false)
+        end
+        return w[key]
+    end
+
     local MAX_ENCH_ROWS    = 24
     local MAX_REAGENT_ROWS = 16
 
@@ -722,6 +794,14 @@ do
         w.reagentRows = w.reagentRows or {}
         for _, r in ipairs(w.enchRows) do r:Hide() end
         for _, r in ipairs(w.reagentRows) do r:Hide() end
+        if w.enchSubA then w.enchSubA:Hide() end
+        if w.enchSubB then w.enchSubB:Hide() end
+        -- Reset the enchant list's scroll position when the selected slot changes
+        -- (but not on a plain re-render, e.g. a bag update while scrolled).
+        if w.selSlot ~= w._renderedSlot then
+            if w.enchScroll then w.enchScroll:SetVerticalScroll(0) end
+            w._renderedSlot = w.selSlot
+        end
 
         local h1    = paneFontString(w, "h1", "GameFontNormal")
         local note  = paneFontString(w, "note", "GameFontDisableSmall")
@@ -736,6 +816,7 @@ do
         h1:SetWidth(pw); h1:Show()
 
         if not w.selSlot then
+            if w.enchScroll then w.enchScroll:Hide() end
             h1:SetText("Available Enchants")
             y = y + 18
             note:ClearAllPoints(); note:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
@@ -746,30 +827,72 @@ do
         else
             h1:SetText("|cffffd100" .. w.selSlot .. "|r enchants")
             y = y + 18
-            local items = (w.availItems and w.availItems[w.selSlot]) or {}
-            local cur = w.curByLabel and w.curByLabel[w.selSlot]
-            local chosen = selection[w.selSlot]
-            local n = 0
-            for _, it in ipairs(items) do
-                if n >= MAX_ENCH_ROWS then break end
-                n = n + 1
-                local r = w.enchRows[n] or makeEnchRow(w)
-                w.enchRows[n] = r
-                r.enchId = it.id; r.fullName = it.name; r.slotLabel = w.selSlot
-                local label = shortEnchName(it.name)
-                local color = "|cffcfcfcf"
-                if cur and it.name and it.name:find(cur, 1, true) then color = "|cff40ff40" end -- equipped
-                r.text:SetText(color .. label .. "|r")
-                r.sel:SetShown(it.id == chosen)
-                r:ClearAllPoints(); r:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
-                r:SetSize(pw, 14); r.text:SetWidth(pw - 6)
-                r:Show()
-                y = y + 15
-            end
-            if n == 0 then
+            local items  = (w.availItems and w.availItems[w.selSlot]) or {}
+            if #items == 0 then
+                if w.enchScroll then w.enchScroll:Hide() end
                 note:ClearAllPoints(); note:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
                 note:SetWidth(pw); note:SetText("No enchants available for this slot yet."); note:Show()
                 y = y + 16
+            else
+                local cur    = w.curByLabel and w.curByLabel[w.selSlot]
+                local chosen = selection[w.selSlot]
+                local newIds   = (w.thisPhaseIds and w.thisPhaseIds[w.selSlot]) or {}
+                local phaseById = w.enchPhaseById or {}
+                -- Most-recent first: enchants added this phase, then everything
+                -- earlier sorted later-phase-on-top (stable within a phase).
+                local thisP, earlier = {}, {}
+                for i, it in ipairs(items) do
+                    if newIds[it.id] then thisP[#thisP + 1] = it
+                    else earlier[#earlier + 1] = { it = it, ord = i } end
+                end
+                table.sort(earlier, function(a, b)
+                    local pa, pb = phaseById[a.it.id] or 0, phaseById[b.it.id] or 0
+                    if pa ~= pb then return pa > pb end
+                    return a.ord < b.ord
+                end)
+
+                local sf, child = ensureEnchScroll(w)
+                local listW = pw - 20            -- leave room for the scrollbar
+                local cy, n = 0, 0
+                local function addRow(it)
+                    if n >= MAX_ENCH_ROWS then return end
+                    n = n + 1
+                    local r = w.enchRows[n] or makeEnchRow(w, child)
+                    w.enchRows[n] = r
+                    r.enchId = it.id; r.fullName = it.name; r.slotLabel = w.selSlot
+                    local label = shortEnchName(it.name)
+                    local color = "|cffcfcfcf"
+                    if cur and it.name and it.name:find(cur, 1, true) then color = "|cff40ff40" end -- equipped
+                    r.text:SetText(color .. label .. "|r")
+                    r.sel:SetShown(it.id == chosen)
+                    r:ClearAllPoints(); r:SetPoint("TOPLEFT", child, "TOPLEFT", 0, -cy)
+                    r:SetSize(listW, 14); r.text:SetWidth(listW - 6)
+                    r:Show()
+                    cy = cy + 15
+                end
+
+                if #thisP > 0 then
+                    local subA = paneChildFS(w, "enchSubA", "GameFontNormalSmall")
+                    subA:ClearAllPoints(); subA:SetPoint("TOPLEFT", child, "TOPLEFT", 0, -cy)
+                    subA:SetWidth(listW); subA:SetText("|cffffd100Added this phase|r"); subA:Show()
+                    cy = cy + 16
+                    for _, it in ipairs(thisP) do addRow(it) end
+                    if #earlier > 0 then
+                        cy = cy + 4
+                        local subB = paneChildFS(w, "enchSubB", "GameFontDisableSmall")
+                        subB:ClearAllPoints(); subB:SetPoint("TOPLEFT", child, "TOPLEFT", 0, -cy)
+                        subB:SetWidth(listW); subB:SetText("Available earlier"); subB:Show()
+                        cy = cy + 16
+                    end
+                end
+                for _, e in ipairs(earlier) do addRow(e.it) end
+
+                child:SetSize(listW, math.max(cy, 1))
+                local listH = math.min(cy, w.enchListMaxH or 150)
+                sf:ClearAllPoints(); sf:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
+                sf:SetSize(listW, listH); sf:Show()
+                if w.enchScrollBar then w.enchScrollBar:SetShown(cy > listH) end
+                y = y + listH
             end
         end
 
@@ -850,6 +973,8 @@ do
 
         local availByLabel = buildCumulativeByLabel()
         self.availItems = buildCumulativeItemsByLabel()
+        self.thisPhaseIds = buildThisPhaseIds()
+        self.enchPhaseById = buildEnchantPhaseById()
         self.curByLabel = {}
         local ROW_H  = DOLL_ICON + 12
         -- Left: the paper doll (two columns) — gets the bulk of the width so the
@@ -857,11 +982,12 @@ do
         -- Right: a slim interaction pane (enchant list + reagent shopping list);
         -- long reagent names truncate but the row's hover tooltip shows them full.
         local PANEGAP = 16
+        local DOLL_PAD = 28   -- left padding before the first doll column
         local paneW   = math.max(150, math.min(185, W * 0.30))
-        local dollW   = math.max(220, W - paneW - PANEGAP)
+        local dollW   = math.max(220, W - paneW - PANEGAP - DOLL_PAD)
         local COLGAP  = 16
         local colW    = math.max(120, math.min(215, (dollW - COLGAP) / 2))
-        local x0      = 0
+        local x0      = DOLL_PAD
         local rightX  = x0 + colW + COLGAP
         local n       = 0
         self.paneX    = W - paneW
@@ -908,14 +1034,15 @@ do
 
         local dollH = cols + DOLL_ICON + 34
 
-        -- Reserve enough height for the worst-case pane (largest slot's enchant
-        -- list + a full shopping list) so adding/removing/selecting never grows
-        -- the frame past what the options scroll-frame already allotted.
-        local maxItems = 0
-        for _, items in pairs(self.availItems) do
-            maxItems = math.max(maxItems, math.min(#items, MAX_ENCH_ROWS))
-        end
-        local paneMaxH = self.paneTop + 18 + maxItems * 15      -- h1 + enchant rows
+        -- The selected slot's enchant list scrolls within at most half the panel
+        -- height (its "container"), so a long list never pushes the shopping list
+        -- off the panel. Capped against the doll height (the panel's natural size).
+        self.enchListMaxH = math.floor(dollH * 0.5)
+
+        -- Reserve enough height for the worst-case pane (the capped, scrollable
+        -- enchant list + a full shopping list) so adding/removing/selecting never
+        -- grows the frame past what the options scroll-frame already allotted.
+        local paneMaxH = self.paneTop + 18 + self.enchListMaxH  -- h1 + enchant list
                        + 12 + 18                                 -- gap + shopping header
                        + MAX_REAGENT_ROWS * 19 + 16              -- reagent rows + footnote
 
@@ -939,6 +1066,7 @@ do
             for _, b in ipairs(self.slots) do b:Hide(); b.info = nil; b.label:Hide() end
             for _, r in ipairs(self.enchRows or {}) do r:Hide() end
             for _, r in ipairs(self.reagentRows or {}) do r:Hide() end
+            if self.enchScroll then self.enchScroll:Hide() end
             if self.h1 then self.h1:Hide() end
             if self.h2 then self.h2:Hide() end
             if self.note then self.note:Hide() end

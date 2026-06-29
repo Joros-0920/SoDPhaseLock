@@ -4,6 +4,25 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.5.0] - 2026-06-29
+
+### Added
+- **New "Group Compliance" tab** in the compliance window: a live check of your **current party/raid**. Unlike the guild roster (which relies on members running the addon), this inspects everyone in your group directly — **pugs and non-addon users included** — and flags anyone outside the active phase on **level, gear, enchants, or runes**. It runs automatically while the tab is open; members are inspected one at a time and must be online and within ~28 yards. There's a **Rescan** button for a manual refresh.
+- **"Why did they fail?" tooltip.** Hover a flagged player's **Status** to see exactly what's wrong — their level vs the phase cap, the specific **later-phase item and enchant links**, and rune count.
+- **Later-phase enchant detection.** The group check now flags gear wearing enchants from a later phase, and the item tooltip distinguishes between a later-phase **item** and a later-phase **enchant** applied to it. (Enchant→phase data sourced from Wowhead Classic, Phases 2–8.)
+- **"Added this phase" in the Available Enchants tab.** When you click a gear slot, the enchants added in the **current phase** are grouped at the top under an "Added this phase" sub-header; the rest follow under "Available earlier", sorted with the most recent phases first.
+
+### Changed
+- **Available Enchants: the per-slot enchant list now scrolls.** It's capped at half the panel height so a long list no longer pushes the reagent shopping list off-screen.
+- **SoD enchants placed in their correct phases.** The Season of Discovery enchants that were provisionally all in Phase 4 are now distributed to their real phases (Phases 2, 4, 6, and 8).
+- **Wording:** "illegal item(s)" is now "invalid item(s)" in the compliance views.
+- Minor layout polish: added left padding to the Available Enchants paper doll.
+
+### Notes
+- The group check is **best-effort and degrade-safe**: out-of-range/offline members show "Out of range" and aren't judged; other players' **runes** can't be inspected (no API), so only your own are checked. Where one enchant ID is shared across phases, the earlier phase wins to avoid false positives. Not yet verified in a live client.
+
+---
+
 ## [0.4.3] - 2026-06-27
 
 ### Added

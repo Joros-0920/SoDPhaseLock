@@ -4,7 +4,8 @@ local ADDON, ns = ...
 -- Each entry is { <spellID>, "<display name>" }
 -- Names + reagents sourced from Wowhead Classic (spell tooltip endpoint).
 -- Phase buckets: vanilla enchants by reagent tier (skill band);
--- SoD-custom enchants (spell id >= 400000) provisionally in Phase 4.
+-- SoD-custom enchants (spell id >= 400000) bucketed per ENCHANTS_BY_PHASE.md
+-- (P2 Dismantle/Retricutioner, P4 Law of Nature, P6 and P8 sets).
 -- BEST-EFFORT phase assignment - verify/split phases 4+ in-client.
 -- =========================================================================
 
@@ -80,6 +81,7 @@ ns.PhaseEnchants = {
             { 13663, "Enchant Chest - Greater Mana" },
             { 13700, "Enchant Chest - Lesser Stats" },
             { 13858, "Enchant Chest - Superior Health" },
+            { 435903, "Enchant Chest - Retricutioner" },  -- SoD (Formula spell 435902)
         } },
         { label = "Bracer", items = {
             { 13501, "Enchant Bracer - Lesser Stamina" },
@@ -119,6 +121,7 @@ ns.PhaseEnchants = {
             { 13655, "Enchant Weapon - Lesser Elemental Slayer" },
             { 13693, "Enchant Weapon - Striking" },
             { 21931, "Enchant Weapon - Winter's Might" },
+            { 435481, "Enchant Weapon - Dismantle" },  -- SoD (Formula spell 435484)
         } },
         { label = "2H Weapon", items = {
             { 13529, "Enchant 2H Weapon - Lesser Impact" },
@@ -207,25 +210,38 @@ ns.PhaseEnchants = {
 
     -- Phase 4 -- SoD level-60 / custom enchants (best-effort).
     [4] = {
-        { label = "Cloak", items = {
-            { 1219587, "Enchant Cloak - Agility" },
+        { label = "Shield", items = {
+            { 463871, "Enchant Shield - Law of Nature" },
         } },
+    },
+
+    -- Phase 6 -- SoD custom enchants (per ENCHANTS_BY_PHASE.md).
+    [6] = {
         { label = "Chest", items = {
-            { 435903, "Enchant Chest - Retricutioner" },
             { 1213616, "Enchant Chest - Living Stats" },
         } },
         { label = "Bracer", items = {
             { 1217189, "Enchant Bracer - Spell Power" },
             { 1217203, "Enchant Bracer - Agility" },
-            { 1220624, "Enchant Bracer - Greater Spellpower" },
         } },
         { label = "Gloves", items = {
             { 1213622, "Enchant Gloves - Holy Power" },
             { 1213626, "Enchant Gloves - Arcane Power" },
+        } },
+    },
+
+    -- Phase 8 -- SoD custom enchants (per ENCHANTS_BY_PHASE.md).
+    [8] = {
+        { label = "Cloak", items = {
+            { 1219587, "Enchant Cloak - Agility" },
+        } },
+        { label = "Bracer", items = {
+            { 1220624, "Enchant Bracer - Greater Spellpower" },
+        } },
+        { label = "Gloves", items = {
             { 1219586, "Enchant Gloves - Superior Strength" },
         } },
         { label = "Shield", items = {
-            { 463871, "Enchant Shield - Law of Nature" },
             { 1219581, "Enchant Shield - Excellent Stamina" },
             { 1220623, "Enchant Shield - Critical Strike" },
         } },
@@ -235,7 +251,6 @@ ns.PhaseEnchants = {
             { 1219579, "Enchant Off-Hand - Wisdom" },
         } },
         { label = "Weapon", items = {
-            { 435481, "Enchant Weapon - Dismantle" },
             { 1231128, "Enchant Weapon - Grand Crusader" },
             { 1231164, "Enchant Weapon - Grand Sorceror" },
         } },

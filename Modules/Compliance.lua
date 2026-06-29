@@ -23,7 +23,7 @@ function Compliance:Record(sender, data)
     end
     if data.vL == 1 then reasons[#reasons + 1] = "over level cap" end
     if data.vI == 1 then reasons[#reasons + 1] = "in locked instance" end
-    if (data.vG or 0) > 0 then reasons[#reasons + 1] = string.format("%d illegal item(s)", data.vG) end
+    if (data.vG or 0) > 0 then reasons[#reasons + 1] = string.format("%d invalid item(s)", data.vG) end
     if data.vP == 1 then reasons[#reasons + 1] = "profession over cap" end
     if (data.vQ or 0) > 0 then reasons[#reasons + 1] = string.format("%d quest(s) from later phase", data.vQ) end
     if data.vR == 1 then reasons[#reasons + 1] = "rune from later phase" end

@@ -143,8 +143,10 @@ driver:SetScript("OnUpdate", function(_, dt)
     if anyBagShown() then updateBagOverlays() end
 end)
 
--- Tooltip decoration: appends which phase the item unlocks at.
--- Fires for every item tooltip regardless of where it's shown.
+-- Tooltip decoration: appends which phase the item — and/or its applied enchant —
+-- unlocks at. The item and the enchant are reported on separate lines so the
+-- player can tell whether it's the gear itself or the enchant on it that's
+-- later-phase. Fires for every item tooltip regardless of where it's shown.
 GameTooltip:HookScript("OnTooltipSetItem", function(tooltip)
     if not (Addon.db and Addon.db.profile.enabled) then return end
     local _, link = tooltip:GetItem()
@@ -153,14 +155,30 @@ GameTooltip:HookScript("OnTooltipSetItem", function(tooltip)
     if not itemID then return end
 
     local phase = Addon:GetPhaseData()
-    if not phase or not ns.ItemViolatesPhase(itemID, phase) then return end
+    if not phase then return end
 
-    local unlockIdx = getItemUnlockPhase(itemID)
-    if unlockIdx then
-        local pd = ns.Phases[unlockIdx]
-        tooltip:AddLine(string.format("|cffff4040SoD Phase Lock:|r Unlocks in %s.", pd.name))
-    else
-        tooltip:AddLine("|cffff4040SoD Phase Lock:|r Not available at the current phase.")
+    -- The item itself.
+    if ns.ItemViolatesPhase(itemID, phase) then
+        local unlockIdx = getItemUnlockPhase(itemID)
+        if unlockIdx then
+            tooltip:AddLine(string.format("|cffff4040SoD Phase Lock:|r Item unlocks in %s.",
+                ns.Phases[unlockIdx].name))
+        else
+            tooltip:AddLine("|cffff4040SoD Phase Lock:|r Item not available at the current phase.")
+        end
+    end
+
+    -- The applied permanent enchant (field 2 of the item link is the apply ID,
+    -- a different namespace from the enchant spell IDs; mapped in
+    -- Data/EnchantApplyPhases.lua). 0 = no enchant.
+    local activeIdx = Addon:GetActivePhase()
+    local enchantID = tonumber(link:match("item:%d+:(%d+)"))
+    if activeIdx and enchantID and enchantID ~= 0 then
+        local enchUnlock = ns.EnchantApplyPhases and ns.EnchantApplyPhases[enchantID]
+        if enchUnlock and enchUnlock > activeIdx then
+            tooltip:AddLine(string.format("|cffff4040SoD Phase Lock:|r Enchant unlocks in %s.",
+                ns.Phases[enchUnlock].name))
+        end
     end
 end)
 
