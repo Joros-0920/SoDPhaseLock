@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.5.1] - 2026-07-02
+
+### Fixed
+- **Instances with a leading "The" no longer falsely locked.** `GetInstanceInfo()` and our data table sometimes disagreed on the leading article (Blizzard returns "Deadmines" while the map/journal name is "The Deadmines"), causing an allowed instance to be treated as out-of-phase. Instance names are now normalized — lowercased, leading "the " dropped, and collapsed to alphanumerics — so all spellings key identically.
+
+---
+
 ## [0.5.0] - 2026-06-29
 
 ### Added

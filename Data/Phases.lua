@@ -5996,14 +5996,25 @@ ns.Phases = {
 ns.MIN_PHASE = 1
 ns.MAX_PHASE = #ns.Phases
 
--- Build the cumulative set of enterable instances for each phase (lowercased
--- for case-insensitive matching against GetInstanceInfo()).
+-- Normalize an instance name for locale/article-insensitive matching.
+-- GetInstanceInfo() and our data table don't always agree on the leading
+-- article — e.g. Blizzard returns "Deadmines" while the map/journal name is
+-- "The Deadmines" — so a raw lowercase compare falsely locks the instance.
+-- Lowercase, drop a leading "the ", and collapse to alphanumerics so
+-- "The Deadmines", "Deadmines", and "the  deadmines" all key identically.
+local function normalizeInstanceName(name)
+    name = name:lower():gsub("^the%s+", "")
+    return (name:gsub("[^%w]", ""))
+end
+
+-- Build the cumulative set of enterable instances for each phase (normalized
+-- for locale/article-insensitive matching against GetInstanceInfo()).
 local function BuildCumulativeInstances()
     local running = {}
     for i = ns.MIN_PHASE, ns.MAX_PHASE do
         local phase = ns.Phases[i]
         for _, name in ipairs(phase.instanceUnlocks) do
-            running[name:lower()] = true
+            running[normalizeInstanceName(name)] = true
         end
         local snapshot = {}
         for k in pairs(running) do snapshot[k] = true end
@@ -6016,5 +6027,5 @@ BuildCumulativeInstances()
 function ns.IsInstanceAllowed(phaseIndex, instanceName)
     local phase = ns.Phases[phaseIndex]
     if not phase or not instanceName then return true end
-    return phase.allowedInstances[instanceName:lower()] == true
+    return phase.allowedInstances[normalizeInstanceName(instanceName)] == true
 end
