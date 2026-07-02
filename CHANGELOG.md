@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.5.3] - 2026-07-02
+
+### Fixed
+- **Lua error on login.** The staggered-sync code introduced in 0.5.2 called `math.randomseed`, which doesn't exist in WoW's Lua sandbox, throwing an error as the addon enabled. Client jitter is now decorrelated without it, so login is clean again.
+
+---
+
 ## [0.5.2] - 2026-07-02
 
 ### Changed

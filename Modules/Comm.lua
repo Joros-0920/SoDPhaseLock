@@ -97,12 +97,14 @@ function Comm:ScheduleStatus()
 end
 
 function Comm:OnEnable()
-    -- Per-client RNG seed so clients logging in the same second still jitter
-    -- differently (GetTime() is machine-local uptime; mix in the player name).
-    local seed = math.floor((GetTime() * 1000) % 2147483647)
+    -- WoW's Lua sandbox has no math.randomseed (math.random is auto-seeded per
+    -- session). To keep clients that share the generator's state from jittering
+    -- in lockstep, advance the sequence a per-client number of steps derived from
+    -- the player name + local uptime before we draw any jitter below.
+    local advance = math.floor((GetTime() * 1000) % 97)
     local name = UnitName("player") or ""
-    for i = 1, #name do seed = (seed + name:byte(i) * i) % 2147483647 end
-    math.randomseed(seed)
+    for i = 1, #name do advance = advance + name:byte(i) * i end
+    for _ = 1, (advance % 251) + 1 do math.random() end
 
     self:RegisterComm(PREFIX, "OnComm")
     -- On login: ask the guild for the current ruleset (jittered to avoid a
