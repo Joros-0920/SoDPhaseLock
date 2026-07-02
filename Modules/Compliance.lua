@@ -10,7 +10,12 @@ ns.Compliance = Compliance
 -- }
 Compliance.roster = {}
 
-local STALE_AFTER = 300   -- seconds before a member's report is considered stale
+-- Seconds before a member's report is considered stale. Tracks Comm's adaptive
+-- ping cadence (large guilds ping slower) so a slow report isn't evicted before
+-- its replacement arrives; falls back to 300 if Comm isn't up yet.
+local function staleAfter()
+    return (ns.Comm and ns.Comm.StaleAfter and ns.Comm:StaleAfter()) or 300
+end
 
 -- Record an incoming status report and derive compliance against OUR ruleset.
 function Compliance:Record(sender, data)
@@ -53,7 +58,7 @@ function Compliance:GetSorted()
     local now = GetTime()
     local list = {}
     for name, info in pairs(self.roster) do
-        if (now - info.updated) <= STALE_AFTER then
+        if (now - info.updated) <= staleAfter() then
             list[#list + 1] = { name = name, info = info }
         end
     end

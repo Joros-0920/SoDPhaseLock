@@ -4,6 +4,17 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.5.2] - 2026-07-02
+
+### Changed
+- **Guild sync now scales to very large guilds (~1000 members).** Status pings are staggered with per-client jitter instead of firing on a shared 60-second boundary, and the ping interval now adapts to the number of online members (60s for small guilds, stretching toward ~250s at 1000) so the guild-wide addon-message rate stays under WoW's drop threshold. The roster's staleness window scales with it. This should stop members going missing from the compliance roster in big guilds.
+- **Ruleset-sync replies no longer storm.** Previously *every* member answered each "request current ruleset" message, so one login triggered up to N replies (and a mass login up to N²). Members now schedule a single jittered reply and cancel it the instant they see anyone else answer, so a request draws roughly one reply guild-wide.
+
+### Notes
+- The large-guild sync changes are protocol-compatible with 0.5.0/0.5.1 clients (message format is unchanged), so a mixed-version guild degrades gracefully during rollout. Not yet verified in a live client.
+
+---
+
 ## [0.5.1] - 2026-07-02
 
 ### Fixed
