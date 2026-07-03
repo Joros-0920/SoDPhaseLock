@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.6.1] - 2026-07-03
+
+### Fixed
+- **The mage "Spell Power" rune no longer gets your gear removed.** When the gear rule was on, an item carrying the *Spell Power* engraving rune was mistaken for a later-phase **enchant** (it shares its name with *Enchant Weapon/Bracer - Spell Power*) and unequipped if "block over-phase gear" was on — even though the rune itself is legal for the phase. The rune's own tooltip line is now ignored when checking for later-phase enchants, so a coexisting real enchant is still caught but the rune no longer triggers a false removal. (This only ever affected the **gear** rule; the separate **Rune** rule handled the rune correctly all along.)
+
+---
+
 ## [0.6.0] - 2026-07-02
 
 ### Added

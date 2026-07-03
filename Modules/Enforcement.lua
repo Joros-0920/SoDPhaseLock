@@ -234,12 +234,15 @@ end
 -- (e.g. the Lunar Idol grants Fury of Stormrage), so that slot is always skipped.
 local INVSLOT_RELIC = 18   -- ranged/relic slot (shares the ranged slot id)
 
--- The item-link enchant id (field 2) an engraved rune parks on this slot, or nil
--- if the slot carries no rune. Lets us tell a rune apart from a genuine enchant.
-local function slotRuneEnchantID(slot)
+-- The engraved rune on this slot, as (item-link enchant id, rune name), or nil
+-- if the slot carries no rune. The id lets us tell a rune apart from a genuine
+-- enchant in item-link field 2; the name lets the tooltip fallback ignore the
+-- rune's own green line (some runes share a display name with an enchant, e.g.
+-- the mage "Spell Power" rune vs. "Enchant Weapon/Bracer - Spell Power").
+local function slotRuneInfo(slot)
     if not (C_Engraving and C_Engraving.GetRuneForEquipmentSlot) then return nil end
     local ok, info = pcall(C_Engraving.GetRuneForEquipmentSlot, slot)
-    if ok and info then return info.itemEnchantmentID end
+    if ok and info then return info.itemEnchantmentID, info.name end
     return nil
 end
 
@@ -283,10 +286,15 @@ end
 -- Needed because an engraved rune can occupy item-link field 2, hiding a
 -- coexisting profession enchant from the apply-id read; the tooltip still shows
 -- the enchant, so we phase-check it by name. Best-effort: names that don't match
--- our data are simply skipped (no false positives; a rune's own line never
--- matches an enchant name).
+-- our data are simply skipped.
+--
+-- `runeName` is the engraved rune's own display name (this fallback only runs on
+-- runed slots). We MUST skip a green line matching it: some runes share a name
+-- with an enchant in our data — e.g. the mage "Spell Power" rune vs. "Enchant
+-- Weapon/Bracer - Spell Power" (P3/P6) — so without this the rune's own line
+-- would be misread as a later-phase enchant and the piece wrongly unequipped.
 local enchScanTip
-local function tooltipEnchantPhase(slot)
+local function tooltipEnchantPhase(slot, runeName)
     if not CreateFrame then return nil end
     if not enchScanTip then
         enchScanTip = CreateFrame("GameTooltip", "SoDPhaseLockEnchScanTip", nil, "GameTooltipTemplate")
@@ -295,6 +303,7 @@ local function tooltipEnchantPhase(slot)
     enchScanTip:ClearLines()
     if not pcall(enchScanTip.SetInventoryItem, enchScanTip, "player", slot) then return nil end
     enchantPhaseByName = enchantPhaseByName or buildEnchantPhaseByName()
+    local runeKey = normalizeEnchName(runeName)
     local latest
     for i = 2, enchScanTip:NumLines() do
         local fs = _G["SoDPhaseLockEnchScanTipTextLeft" .. i]
@@ -302,8 +311,13 @@ local function tooltipEnchantPhase(slot)
         if t then
             local r, g, b = fs:GetTextColor()
             if r and g and b and r < 0.2 and g > 0.8 and b < 0.2 then
-                local phase = enchantPhaseByName[normalizeEnchName(t) or ""]
-                if phase and (not latest or phase > latest) then latest = phase end
+                local key = normalizeEnchName(t)
+                -- Ignore the rune's own line — it isn't an enchant even when its
+                -- name collides with one in our data.
+                if key and key ~= runeKey then
+                    local phase = enchantPhaseByName[key]
+                    if phase and (not latest or phase > latest) then latest = phase end
+                end
             end
         end
     end
@@ -320,7 +334,7 @@ local function enchantViolationPhase(slot, activePhase)
     if slot == INVSLOT_RELIC then return nil end   -- field 2 is a rune here, never a gear enchant
     local link = GetInventoryItemLink("player", slot)
     if not link then return nil end
-    local runeEnchID = slotRuneEnchantID(slot)
+    local runeEnchID, runeName = slotRuneInfo(slot)
 
     -- 1) Fast path: field 2 of the item link carries the enchant apply id. Skip it
     -- when it IS the engraved rune (compare, not blanket-skip, so a coexisting
@@ -333,9 +347,10 @@ local function enchantViolationPhase(slot, activePhase)
     end
 
     -- 2) Tooltip fallback: only when this slot has a rune (the rune may occupy
-    -- field 2 and hide a coexisting enchant from step 1). Phase-check by name.
+    -- field 2 and hide a coexisting enchant from step 1). Phase-check by name,
+    -- passing the rune name so its own green line is ignored.
     if runeEnchID then
-        local byName = tooltipEnchantPhase(slot)
+        local byName = tooltipEnchantPhase(slot, runeName)
         if byName and byName > activePhase then return byName end
     end
     return nil
