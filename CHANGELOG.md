@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.6.3] - 2026-07-03
+
+### Fixed
+- **Rune-granting relics (idols, librams, …) are no longer removed by the gear rule.** An equipped rune relic such as the *Idol of the Huntress* was being flagged "can't be worn this phase" and auto-unequipped when "block over-phase gear" was on, even with the **Rune** rule off — because self-enforcement still treated it as a later-phase *item*. Rune relics are now governed solely by the **Rune** rule everywhere (self gear scan, bind-equip block, and Group Compliance), matching how the bag red-X already worked: with the Rune rule off they're left alone; with it on, an equipped relic is flagged (and removed when blocking is on) only when its rune belongs to a later phase.
+
+---
+
 ## [0.6.2] - 2026-07-03
 
 ### Added

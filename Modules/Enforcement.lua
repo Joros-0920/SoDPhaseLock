@@ -199,10 +199,21 @@ end
 -- to guild compliance as a separate `enchant` count so officers can tell an
 -- illegal item apart from a legal item bearing an illegal enchant.
 -- ---------------------------------------------------------------------------
+-- Rune-granting relics (Druid idols, Paladin librams, etc.) deliver a class rune
+-- via the relic slot. Their legality is a RUNE concern, governed by the "rune"
+-- rule (see Data/RuneRelics.lua + CheckGear's rune-relic branch below), NOT the
+-- gear rule. They sit in bannedItems from the bulk sod-item-db import, so without
+-- this guard the gear rule would flag/auto-unequip a legal relic even when the
+-- player has the rune rule off.
+local function isRuneRelic(itemID)
+    return itemID ~= nil and ns.RuneRelicPhases ~= nil and ns.RuneRelicPhases[itemID] ~= nil
+end
+
 -- An item is disallowed if its required level exceeds the phase cap, or it is
 -- explicitly listed as sourced from a later phase (authentic mode only).
 local function itemViolation(itemID, phase)
     if not itemID then return false end
+    if isRuneRelic(itemID) then return false end   -- rune rule governs these, not gear
     if phase.bannedItems[itemID] then return true end
     local reqLevel = select(5, GetItemInfo(itemID))   -- may be nil until cached
     if reqLevel and reqLevel > phase.levelCap then return true end
@@ -216,6 +227,7 @@ ns.ItemViolatesPhase = itemViolation
 -- Gear rule off: req-level only (matches the bag overlay level-cap indicator).
 local function itemViolatesInMode(itemID, phase)
     if not itemID then return false end
+    if isRuneRelic(itemID) then return false end   -- rune rule governs these, not gear
     if enabled("gear") then
         return itemViolation(itemID, phase)
     end
@@ -366,13 +378,28 @@ function Enforcement:CheckGear()
     if not phase then return end
     local block    = Addon:AutoUnequip()
     local gearRule = enabled("gear")
+    local runeRule = enabled("rune")
     local active   = Addon:GetActivePhase()
     local count, enchantCount = 0, 0
+    local runeRelicViol = false
     for slot = INVSLOT_FIRST, INVSLOT_LAST do
         local itemID = GetInventoryItemID("player", slot)
         if itemID then
             local link = select(2, GetItemInfo(itemID)) or ("item:" .. itemID)
-            if itemViolatesInMode(itemID, phase) then
+            local relicPhase = ns.RuneRelicPhases and ns.RuneRelicPhases[itemID]
+            if relicPhase then
+                -- Rune-granting relic: governed by the RUNE rule, never the gear
+                -- rule. A violation only when its rune unlocks LATER than active.
+                if runeRule and active and relicPhase > active then
+                    runeRelicViol = true
+                    if block then
+                        Addon:Alert(link .. " grants a rune from a later phase — removing it.", "gear" .. slot)
+                        self:Unequip(slot)
+                    else
+                        Addon:Alert(link .. " grants a rune from a later phase.", "gear" .. slot)
+                    end
+                end
+            elseif itemViolatesInMode(itemID, phase) then
                 -- The item itself is over-phase — the enchant is moot, it's leaving.
                 count = count + 1
                 if block then
@@ -404,6 +431,11 @@ function Enforcement:CheckGear()
         self.violations.gear    = 0
         self.violations.enchant = 0
     end
+    -- Equipped rune-relic result is a "rune" violation. CheckGear and CheckRune
+    -- fire on different events, so each stores its own half and recombines them
+    -- (OR) to avoid clobbering the other's contribution to violations.rune.
+    self._runeRelicViol   = runeRelicViol
+    self.violations.rune  = self._runeRelicViol or self._engraveRuneViol or false
 end
 
 -- Bind-on-equip confirmation popups. If the item awaiting confirmation is
@@ -734,13 +766,22 @@ end
 -- Shared with the UI for engraving-panel decoration.
 ns.RuneViolatesPhase = runeViolatesPhase
 
+-- Recombine the two independently-computed halves of the "rune" violation:
+-- engraving runes (this function) and equipped rune relics (CheckGear).
+local function combineRune(self)
+    self.violations.rune = self._runeRelicViol or self._engraveRuneViol or false
+end
+
 function Enforcement:CheckRune()
     if not (Addon.db.profile.enabled and enabled("rune")) then
-        self.violations.rune = false
+        self._engraveRuneViol = false
+        combineRune(self)
         return
     end
     if not (C_Engraving and C_Engraving.GetRunes) then
-        self.violations.rune = false
+        -- Engraving API missing, but equipped rune relics still count (CheckGear).
+        self._engraveRuneViol = false
+        combineRune(self)
         return
     end
     local phase = P()
@@ -755,7 +796,8 @@ function Enforcement:CheckRune()
             Addon:Alert(label .. " is a rune from a later phase.", "rune" .. tostring(spellID or label))
         end
     end
-    self.violations.rune = anyViolation
+    self._engraveRuneViol = anyViolation
+    combineRune(self)
 end
 
 -- Resolve the rune being engraved. C_Engraving.CastRune's argument differs by
