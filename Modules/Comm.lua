@@ -7,6 +7,34 @@ local LibSerialize = LibStub("LibSerialize")
 local LibDeflate   = LibStub("LibDeflate")
 local PREFIX       = ns.COMM_PREFIX
 
+-- Our own version, read from the .toc. Rides along on the status/ruleset messages
+-- that already flow guild-wide (no extra traffic), so peers can tell each other
+-- when a newer build is out. C_AddOns is the modern namespace; fall back for older
+-- clients.
+local VERSION = (((C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata)(ADDON, "Version")) or "0"
+ns.Version = VERSION
+
+-- Parse a version string into a list of numeric components ("0.5.3" -> {0,5,3}),
+-- ignoring any non-numeric suffix. Component-wise numeric compare so 0.5.10 > 0.5.3.
+local function parseVersion(s)
+    local t = {}
+    for num in tostring(s):gmatch("%d+") do
+        t[#t + 1] = tonumber(num)
+    end
+    return t
+end
+
+-- -1 if a < b, 0 if equal, 1 if a > b.
+local function compareVersions(a, b)
+    local pa, pb = parseVersion(a), parseVersion(b)
+    local n = math.max(#pa, #pb)
+    for i = 1, n do
+        local x, y = pa[i] or 0, pb[i] or 0
+        if x ~= y then return (x < y) and -1 or 1 end
+    end
+    return 0
+end
+
 -- Message types: "R" ruleset, "REQ" request current ruleset, "S" status
 --
 -- Traffic budget: WoW's server drops guild addon messages above a low aggregate
@@ -137,6 +165,7 @@ local function rulesetPayload()
         auto    = r.autoUnequip,
         grace   = r.instanceGrace,
         npd     = r.nextPhaseDate,
+        v       = VERSION,
     }
 end
 
@@ -159,11 +188,37 @@ function Comm:SendStatus()
         vL    = v.overLevel and 1 or 0,
         vI    = v.instance and 1 or 0,
         vG    = v.gear or 0,
+        vE    = v.enchant or 0,
         vP    = v.profession and 1 or 0,
         vQ    = v.quest or 0,
         vR    = v.rune and 1 or 0,
         vX    = IsXPUserDisabled() and 1 or 0,   -- XP gains disabled at NPC (informational, not a violation)
+        v     = VERSION,                         -- addon version, for out-of-date detection
     })
+end
+
+-- ---------------------------------------------------------------------------
+-- Out-of-date detection
+-- ---------------------------------------------------------------------------
+-- The highest peer version we've seen this session that is newer than ours
+-- (nil while we're up to date). Read by /sodlock status and the options panel.
+function Comm:NewerVersion()
+    return self.newerVersion
+end
+
+-- Fold in a version string reported by a guildmate. If it's newer than ours (and
+-- newer than any we've already flagged), remember it and tell the player once —
+-- a plain chat notice, not a red Alert, since being behind isn't a rule violation.
+function Comm:NotePeerVersion(their)
+    if type(their) ~= "string" or their == "" then return end
+    if compareVersions(their, VERSION) <= 0 then return end                       -- not newer than us
+    if self.newerVersion and compareVersions(their, self.newerVersion) <= 0 then  -- already flagged this (or newer)
+        return
+    end
+    self.newerVersion = their
+    Addon:Print(string.format(
+        "a newer version |cff00ff00%s|r is available (you have |cffffd100%s|r). Update SoD Phase Lock so you stay in sync with your guild.",
+        their, VERSION))
 end
 
 -- ---------------------------------------------------------------------------
@@ -174,6 +229,7 @@ function Comm:OnComm(prefix, message, distribution, sender)
     local data = unpack(message)
     if not data or not data.t then return end
     local me = UnitName("player")
+    if sender ~= me then self:NotePeerVersion(data.v) end
 
     if data.t == "R" then
         -- Authority is tied to whoever ORIGINALLY set the ruleset (data.by),

@@ -47,12 +47,17 @@ local defaults = {
         },
         officerRankIndex = 1,    -- guild ranks 0..this may set/broadcast the ruleset (0 = GM)
     },
+    char = {
+        -- Strictly per-character, never shared across profiles: whether this
+        -- character has seen the first-run welcome. Lives in `char` (not `profile`)
+        -- so assigning a shared profile can't suppress the welcome on a new alt.
+        seenWelcome = false,
+    },
     profile = {
         -- Personal preferences (never synced).
         enabled      = true,     -- local master switch / kill switch
         sound        = true,
         minimap      = { hide = false },
-        seenWelcome  = false,
         -- Per-player opt-in restrictions. These are ORed with the guild enforce
         -- table in RuleEnabled(), so a player can add restrictions but never
         -- remove guild-imposed ones.
@@ -320,6 +325,13 @@ function Addon:HandleSlash(input)
         self:Print(string.format("Mode |cff00ff00%s|r | %s | level cap %d | set by %s (epoch %d)",
             self:GetMode(), data and data.name or "?", data and data.levelCap or 0, r.setBy ~= "" and r.setBy or "—", r.epoch))
         self:Print(self:IsOfficer() and "You are an officer (can set the phase)." or "You are a member (read-only).")
+        local comm = self:GetModule("Comm", true)
+        local newer = comm and comm:NewerVersion()
+        if newer then
+            self:Print(string.format("Version |cffffd100%s|r — |cff00ff00%s|r is available; update to stay in sync.", ns.Version or "?", newer))
+        else
+            self:Print(string.format("Version |cff00ff00%s|r (up to date, as far as your guild has reported).", ns.Version or "?"))
+        end
     elseif input == "roster" then
         if ns.ToggleRoster then ns.ToggleRoster() end
     elseif input == "scan" then

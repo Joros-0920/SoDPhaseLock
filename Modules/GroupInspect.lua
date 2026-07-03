@@ -56,11 +56,17 @@ end
 -- an explicit ns.EnchantApplyPhases[applyID] = unlockPhase map. Until that is
 -- seeded this records how many slots are enchanted but flags none (no false
 -- positives). Returns (enchantedCount, laterPhaseCount).
+local INVSLOT_RELIC = 18   -- ranged/relic slot
 local function scanEnchants(unit, activePhase)
     local applyMap = ns.EnchantApplyPhases
     local enchanted, later, details = 0, 0, {}
     for slot = INVSLOT_FIRST, INVSLOT_LAST do
-        local link = GetInventoryItemLink and GetInventoryItemLink(unit, slot)
+        -- Skip the ranged/relic slot: no classic gear enchant in ns.EnchantApplyPhases
+        -- applies there, but a SoD rune-granting relic (idol/libram/totem/sigil) puts
+        -- its rune's enchant id in field 2, which would otherwise collide with the map
+        -- and false-flag the piece. (Runes ride in the same field-2 slot as enchants;
+        -- we have no per-unit rune API to tell them apart on other slots.)
+        local link = slot ~= INVSLOT_RELIC and GetInventoryItemLink and GetInventoryItemLink(unit, slot)
         if link then
             local enchantID = tonumber((link:match("|Hitem:%d+:(%d+)")))
             if enchantID and enchantID > 0 then

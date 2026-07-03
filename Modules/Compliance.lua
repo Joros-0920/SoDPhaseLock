@@ -4,7 +4,7 @@ local Compliance = Addon:NewModule("Compliance")
 ns.Compliance = Compliance
 
 -- roster[playerName] = {
---   level, phase, mode, epoch, overLevel, instance, gear, profession,
+--   level, phase, mode, epoch, overLevel, instance, gear, enchant, profession,
 --   xpLocked (bool, informational — not a violation),
 --   compliant (bool), reasons (string), updated (GetTime())
 -- }
@@ -29,6 +29,7 @@ function Compliance:Record(sender, data)
     if data.vL == 1 then reasons[#reasons + 1] = "over level cap" end
     if data.vI == 1 then reasons[#reasons + 1] = "in locked instance" end
     if (data.vG or 0) > 0 then reasons[#reasons + 1] = string.format("%d invalid item(s)", data.vG) end
+    if (data.vE or 0) > 0 then reasons[#reasons + 1] = string.format("%d later-phase enchant(s)", data.vE) end
     if data.vP == 1 then reasons[#reasons + 1] = "profession over cap" end
     if (data.vQ or 0) > 0 then reasons[#reasons + 1] = string.format("%d quest(s) from later phase", data.vQ) end
     if data.vR == 1 then reasons[#reasons + 1] = "rune from later phase" end
@@ -41,6 +42,7 @@ function Compliance:Record(sender, data)
         overLevel  = data.vL == 1,
         instance   = data.vI == 1,
         gear       = data.vG or 0,
+        enchant    = data.vE or 0,
         profession = data.vP == 1,
         quest      = data.vQ or 0,
         rune       = data.vR == 1,

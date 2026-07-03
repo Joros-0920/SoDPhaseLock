@@ -4,6 +4,22 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.6.0] - 2026-07-02
+
+### Added
+- **New "Guild Population" tab** in the main SoD Phase Lock window (between **Overview** and **Available Enchants**): a filled pie chart of your guild's membership broken down by class, with a class-colored legend listing the count and percentage for each class.
+- **Later-phase enchants are now enforced on your own gear.** Previously an equipped item was only removed if the *item* was from a later phase — an otherwise-legal item carrying an enchant from a later phase slipped through. Now, when the gear rule is on (self-enforced via Personal Challenges or guild-enforced), any equipped piece bearing a later-phase enchant is unequipped (out of combat; queued and removed when you leave combat), just like an over-phase item. The enchant itself can't be stripped, so the whole piece comes off. These are reported to the guild compliance roster separately as "N later-phase enchant(s)" so officers can tell an illegal item apart from a legal item with an illegal enchant.
+- **Out-of-date notice.** The addon now tells you when a guildmate is running a newer version than you. Your version rides along on the guild-sync messages the addon already sends (no extra traffic), and the first time it sees a newer one it prints a one-time chat notice so you know to update. `/sodlock status` shows your current version and any newer version seen.
+
+### Fixed
+- **Idols, librams, totems and sigils are no longer wrongly unequipped.** Season of Discovery stores an engraved rune in the same item-link slot a permanent enchant uses, and a rune-granting relic (e.g. the Lunar Idol, which grants Fury of Stormrage) puts its rune there. The addon was reading that value as if it were a later-phase gear enchant, so with "block over-phase gear" on it auto-removed the relic. Runes are now recognized and never mistaken for a later-phase enchant: the relic slot is skipped (no gear enchant can live there), and for your own gear the addon checks whether a slot is actually engraved. The same false flag is also gone from the Group Compliance tab and item tooltips.
+- **Rune items no longer get a red X in your bags when rune restrictions are off.** Engraving runes ("Rune of …") live in the same later-phase item list as gear, so with "block over-phase gear" on they were marked with the red X even for players who left the separate **Rune** rule unchecked. Now a rune item is only flagged when rune enforcement is actually on; with the Rune rule off, later-phase rune items in your bags (and their "unlocks in …" tooltip line) are left alone.
+- **Rune-granting relics (idols, librams, …) are now gated by the Rune rule, not the gear rule.** Some SoD class runes are delivered as relic-slot items (e.g. *Idol of the Raging Shambler*); these were flagged with the red X by "block over-phase gear" even when the **Rune** rule was off. They're now governed solely by the Rune rule, using an explicit rune-relic list (`Data/RuneRelics.lua`) so ordinary stat relics are unaffected: with the Rune rule on, a rune relic is marked (and its tooltip reads "Rune unlocks in …") only when its rune belongs to a later phase; with the Rune rule off, it's left alone.
+- **First-run welcome popup is now strictly per-character.** The "seen the welcome" flag lived in the profile scope, so assigning one shared profile to several characters could suppress the welcome on a brand-new alt. It now lives in the per-character scope, so every character reliably sees the welcome exactly once regardless of profile sharing.
+- **Compliance window no longer jumps to the top.** The Guild/Group Compliance list rebuilds whenever a status ping arrives; it was snapping the scroll back to the top each time, making a long roster hard to read. Scroll position is now preserved across updates.
+
+---
+
 ## [0.5.3] - 2026-07-02
 
 ### Fixed

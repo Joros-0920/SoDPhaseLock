@@ -104,9 +104,10 @@ end
 -- Two registered variants: the active phase ("This Phase") and the next phase
 -- ("Coming Next"). Each carries its own left-text provider (summaryFn) and a
 -- phase-index provider (dropsPhaseFn) for which PhaseRaidDrops list to render.
-local PANEL_WIDGET          = "SoDPhasePanel"
-local PANEL_WIDGET_NEXT     = "SoDPhasePanelNext"
-local PANEL_WIDGET_ENCHANTS = "SoDPhaseEnchantsPanel"
+local PANEL_WIDGET            = "SoDPhasePanel"
+local PANEL_WIDGET_NEXT       = "SoDPhasePanelNext"
+local PANEL_WIDGET_ENCHANTS   = "SoDPhaseEnchantsPanel"
+local PANEL_WIDGET_POPULATION = "SoDPhasePopulationPanel"
 do
     local AceGUI = LibStub("AceGUI-3.0")
     local ICON, GAP, LEFT_FRAC, QMARK = 30, 5, 0.58, 134400
@@ -1101,6 +1102,208 @@ do
     AceGUI:RegisterWidgetType(PANEL_WIDGET_ENCHANTS, EnchantsConstructor, 1)
 end
 
+-- ---------------------------------------------------------------------------
+-- "Guild Population" panel: a filled class-breakdown pie + class-colored legend.
+-- Data is read straight off the local guild roster (ns.GuildPopulation) — no
+-- AceComm traffic. The pie is a TRIANGLE FAN: each class slice is subdivided
+-- into thin solid-colored triangles whose four texture corners are collapsed to
+-- the disc centre / placed on the rim via Texture:SetVertexOffset. This draws a
+-- genuinely filled wedge with no external art and no fragile Cooldown-swipe
+-- geometry (SetRotation can't sweep a solid color, so a fan of solid triangles
+-- is the reliable art-free filled-pie method). The legend always renders even if
+-- SetVertexOffset is somehow unavailable, so the breakdown is never lost.
+-- ---------------------------------------------------------------------------
+do
+    local AceGUI = LibStub("AceGUI-3.0")
+    local PIE_R        = 90     -- pie radius (disc = 2R across)
+    local SEG_DEG      = 3      -- max degrees per sub-triangle (smooth rim)
+    local PAD          = 10
+    local TITLE_H      = 26
+    local LEGEND_GAP   = 40     -- gap between the disc and the legend column
+    local LEGEND_SW    = 12     -- legend colour-swatch size
+    local LEGEND_ROW_H = 22
+
+    -- Most-recently-acquired live widget, so the module's change hook can repaint.
+    local populationWidget
+
+    local function haveData()
+        return ns.GuildPopulation ~= nil
+    end
+
+    -- Draw the filled pie centred at (cx, cy) from the frame's TOPLEFT, radius R.
+    -- Returns the number of triangle textures used (all pooled on the widget).
+    local function drawPie(w, cx, cy, R)
+        local frame = w.frame
+        for _, t in ipairs(w.wedges) do t:Hide() end
+        if not haveData() then return end
+        local list, total = ns.GuildPopulation:GetData()
+        if not total or total == 0 then return end
+
+        local n, cum = 0, 0
+        for _, e in ipairs(list) do
+            local r, g, b = ns.GuildPopulation:ClassColor(e.token)
+            local f0 = cum
+            local f1 = cum + e.count / total
+            cum = f1
+            local steps = math.max(1, math.ceil((f1 - f0) * 360 / SEG_DEG))
+            for s = 1, steps do
+                local a0 = f0 + (f1 - f0) * (s - 1) / steps
+                local a1 = f0 + (f1 - f0) * s / steps
+                -- Clockwise from 12 o'clock: math angle = 90deg - 360*fraction.
+                local ang0 = math.rad(90 - 360 * a0)
+                local ang1 = math.rad(90 - 360 * a1)
+                local ax, ay = R * math.cos(ang0), R * math.sin(ang0)
+                local bx, by = R * math.cos(ang1), R * math.sin(ang1)
+
+                n = n + 1
+                local t = w.wedges[n]
+                if not t then
+                    t = frame:CreateTexture(nil, "ARTWORK")
+                    w.wedges[n] = t
+                end
+                t:SetColorTexture(r, g, b, 1)
+                t:ClearAllPoints()
+                t:SetSize(2 * R, 2 * R)
+                -- Base quad centred on the disc; corners default to (±R, ±R).
+                t:SetPoint("CENTER", frame, "TOPLEFT", cx, -cy)
+                if t.SetVertexOffset then
+                    -- Collapse the two left corners onto the centre, and move the
+                    -- two right corners to the rim points A and B → triangle O,A,B.
+                    t:SetVertexOffset(1,  R, -R)          -- UL (-R,+R) -> (0,0)
+                    t:SetVertexOffset(2,  R,  R)          -- LL (-R,-R) -> (0,0)
+                    t:SetVertexOffset(3,  ax - R, ay - R) -- UR (+R,+R) -> A
+                    t:SetVertexOffset(4,  bx - R, by + R) -- LR (+R,-R) -> B
+                end
+                t:Show()
+            end
+        end
+    end
+
+    local function RelayoutPopulation(w)
+        if w.resizing then return end
+        local frame = w.frame
+        local W = frame.width or frame:GetWidth() or 500
+
+        -- Read only — NEVER rescan here. Rescan() fires ns.OnGuildPopulationChanged,
+        -- which re-enters this function; a rescan here would recurse infinitely.
+        local list, total = {}, 0
+        if haveData() then list, total = ns.GuildPopulation:GetData() end
+
+        w.title:ClearAllPoints()
+        w.title:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+        w.title:SetText(string.format("Guild Population — |cffffffff%d|r member%s",
+            total or 0, (total == 1) and "" or "s"))
+
+        for _, t in ipairs(w.wedges) do t:Hide() end
+        for _, row in ipairs(w.legend) do row.sw:Hide(); row.txt:Hide() end
+        w.empty:Hide()
+
+        if not total or total == 0 then
+            w.empty:ClearAllPoints()
+            w.empty:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -TITLE_H - 8)
+            w.empty:SetWidth(math.max(50, W))
+            w.empty:Show()
+            w.resizing = true
+            frame:SetHeight(TITLE_H + 40); frame.height = TITLE_H + 40
+            w.resizing = nil
+            return
+        end
+
+        -- Pie on the left.
+        local cx = PAD + PIE_R
+        local cy = TITLE_H + PAD + PIE_R
+        drawPie(w, cx, cy, PIE_R)
+
+        -- Class-colored legend column to the right of the disc.
+        local legendX = PAD + 2 * PIE_R + LEGEND_GAP
+        local legendW = math.max(120, W - legendX)
+        local ly = TITLE_H + PAD
+        for i, e in ipairs(list) do
+            local r, g, b = ns.GuildPopulation:ClassColor(e.token)
+            local row = w.legend[i]
+            if not row then
+                row = {
+                    sw  = frame:CreateTexture(nil, "ARTWORK"),
+                    txt = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal"),
+                }
+                row.sw:SetSize(LEGEND_SW, LEGEND_SW)
+                row.txt:SetJustifyH("LEFT")
+                w.legend[i] = row
+            end
+            row.sw:ClearAllPoints()
+            row.sw:SetPoint("TOPLEFT", frame, "TOPLEFT", legendX, -ly)
+            row.sw:SetColorTexture(r, g, b)
+            row.sw:Show()
+            row.txt:ClearAllPoints()
+            row.txt:SetPoint("LEFT", row.sw, "RIGHT", 8, 0)
+            row.txt:SetWidth(math.max(40, legendW - LEGEND_SW - 8))
+            local pct = e.count / total * 100
+            row.txt:SetText(string.format("%s  |cffffffff%d|r |cff808080(%.0f%%)|r",
+                ns.GuildPopulation:ClassName(e.token), e.count, pct))
+            row.txt:SetTextColor(r, g, b)
+            row.txt:Show()
+            ly = ly + LEGEND_ROW_H
+        end
+
+        local pieBottom = cy + PIE_R + PAD
+        local h = math.max(pieBottom, ly + PAD, TITLE_H + 20)
+        w.resizing = true
+        frame:SetHeight(h); frame.height = h
+        w.resizing = nil
+    end
+
+    local popMethods = {
+        OnAcquire = function(self)
+            populationWidget = self
+            self.resizing = true; self:SetWidth(500); self.resizing = nil
+            -- Refresh the roster count once on open (its change hook repaints if
+            -- we're shown); then paint directly so the panel fills in immediately.
+            if haveData() then ns.GuildPopulation:Rescan() end
+            RelayoutPopulation(self)
+        end,
+        OnRelease = function(self)
+            if populationWidget == self then populationWidget = nil end
+            for _, t in ipairs(self.wedges) do t:Hide() end
+            for _, row in ipairs(self.legend) do row.sw:Hide(); row.txt:Hide() end
+            self.empty:Hide()
+        end,
+        OnWidthSet    = function(self) RelayoutPopulation(self) end,
+        SetText       = function(self) RelayoutPopulation(self) end,  -- AceConfig description path
+        SetFontObject = function() end,
+        SetImage      = function() end,
+        SetImageSize  = function() end,
+        SetColor      = function() end,
+    }
+
+    local function PopulationConstructor()
+        local frame = CreateFrame("Frame", nil, UIParent)
+        frame:Hide()
+        local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetJustifyH("LEFT")
+        local empty = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableLarge")
+        empty:SetJustifyH("LEFT")
+        empty:SetText("You are not in a guild, or the roster hasn't loaded yet.")
+        empty:Hide()
+        local widget = {
+            frame = frame, type = PANEL_WIDGET_POPULATION,
+            title = title, empty = empty, wedges = {}, legend = {},
+        }
+        for k, v in pairs(popMethods) do widget[k] = v end
+        frame.obj = widget
+        return AceGUI:RegisterAsWidget(widget)
+    end
+    AceGUI:RegisterWidgetType(PANEL_WIDGET_POPULATION, PopulationConstructor, 1)
+
+    -- Called by Modules/GuildPopulation.lua after a roster recount. Repaint only
+    -- when the population panel is the one currently on screen.
+    function ns.OnGuildPopulationChanged()
+        local w = populationWidget
+        if w and w.frame and w.frame:IsShown() then
+            RelayoutPopulation(w)
+        end
+    end
+end
+
 local options = {
     type = "group",
     name = "SoD Phase Lock",
@@ -1197,6 +1400,15 @@ local options = {
                             dialogControl = PANEL_WIDGET_NEXT, width = "full", name = "",
                         },
                     },
+                },
+            },
+        },
+        population = {
+            type = "group", order = 16, name = "Guild Population",
+            args = {
+                panel = {
+                    type = "description", order = 10,
+                    dialogControl = PANEL_WIDGET_POPULATION, width = "full", name = "",
                 },
             },
         },

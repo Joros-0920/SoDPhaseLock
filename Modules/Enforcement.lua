@@ -8,6 +8,7 @@ Enforcement.violations = {
     overLevel  = false,
     instance   = false,   -- currently inside a not-yet-unlocked instance
     gear       = 0,       -- count of equipped over-phase items
+    enchant    = 0,       -- count of equipped items carrying a later-phase enchant
     profession = false,
     quest      = 0,       -- count of accepted quests from a later phase (authentic only)
     rune       = false,   -- learned at least one rune from a later phase (authentic only)
@@ -190,6 +191,13 @@ end
 -- Authentic + gear rule: full check (bannedItems + req-level).
 -- Relaxed mode: req-level check only — same signal as the bag overlay red X.
 -- Guild compliance violations are only counted in authentic mode.
+--
+-- LATER-PHASE ENCHANTS: an item can be phase-legal but carry an enchant from a
+-- later phase. The enchant can't be stripped, so the enforcement action is to
+-- unequip the whole enchanted piece (same as an over-phase item). Only checked
+-- when the gear rule is on (there is no level-cap analog for enchants); reported
+-- to guild compliance as a separate `enchant` count so officers can tell an
+-- illegal item apart from a legal item bearing an illegal enchant.
 -- ---------------------------------------------------------------------------
 -- An item is disallowed if its required level exceeds the phase cap, or it is
 -- explicitly listed as sourced from a later phase (authentic mode only).
@@ -215,34 +223,171 @@ local function itemViolatesInMode(itemID, phase)
     return reqLevel ~= nil and reqLevel > phase.levelCap
 end
 
+-- SoD engraved runes ride in the SAME item-link field (field 2) as a classic
+-- permanent enchant, but their SpellItemEnchantment IDs are a DIFFERENT namespace
+-- that can numerically collide with the classic apply IDs in ns.EnchantApplyPhases.
+-- A single slot can carry BOTH a rune and a normal enchant, so we can't just skip
+-- any runed slot — that would miss a real later-phase enchant sharing the slot.
+-- Instead we identify the rune's own enchant id and ignore field 2 only when it IS
+-- that rune. The ranged/relic slot (18) is special: no enchant in the map applies
+-- there and a rune-granting idol/libram/totem/sigil parks its rune id in field 2
+-- (e.g. the Lunar Idol grants Fury of Stormrage), so that slot is always skipped.
+local INVSLOT_RELIC = 18   -- ranged/relic slot (shares the ranged slot id)
+
+-- The item-link enchant id (field 2) an engraved rune parks on this slot, or nil
+-- if the slot carries no rune. Lets us tell a rune apart from a genuine enchant.
+local function slotRuneEnchantID(slot)
+    if not (C_Engraving and C_Engraving.GetRuneForEquipmentSlot) then return nil end
+    local ok, info = pcall(C_Engraving.GetRuneForEquipmentSlot, slot)
+    if ok and info then return info.itemEnchantmentID end
+    return nil
+end
+
+-- Reverse map: normalized applied-enchant name -> earliest phase it appears in.
+-- Built lazily from ns.PhaseEnchants (the same data the Available Enchants tab
+-- uses). Powers the tooltip fallback below, which phase-checks an enchant by NAME
+-- when it isn't visible in item-link field 2.
+local enchantPhaseByName
+local function normalizeEnchName(s)
+    if not s then return nil end
+    s = s:gsub("^[Ee]nchanted:%s*", "")   -- some tooltips prefix the green line
+    s = s:gsub("^%+", "")                 -- and/or a leading "+"
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then return nil end
+    return s:lower()
+end
+local function buildEnchantPhaseByName()
+    local map = {}
+    -- Ascending phase order so the EARLIEST occurrence wins (never over-flag a
+    -- name that also exists at/earlier than the active phase).
+    for phase = ns.MIN_PHASE or 1, ns.MAX_PHASE or 8 do
+        local groups = ns.PhaseEnchants and ns.PhaseEnchants[phase]
+        if groups then
+            for _, group in ipairs(groups) do
+                for _, entry in ipairs(group.items or {}) do
+                    local name = entry[2]
+                    -- Strip the "Enchant <Slot> - " prefix down to the applied name
+                    -- (what the item tooltip's green line actually shows).
+                    local short = name and name:match("^[Ee]nchant .- %- (.+)$")
+                    local key = normalizeEnchName(short or name)
+                    if key and map[key] == nil then map[key] = phase end
+                end
+            end
+        end
+    end
+    return map
+end
+
+-- Fallback: read every green permanent-enchant line off the equipped item's
+-- tooltip and return the LATEST recognized enchant phase (nil if none matched).
+-- Needed because an engraved rune can occupy item-link field 2, hiding a
+-- coexisting profession enchant from the apply-id read; the tooltip still shows
+-- the enchant, so we phase-check it by name. Best-effort: names that don't match
+-- our data are simply skipped (no false positives; a rune's own line never
+-- matches an enchant name).
+local enchScanTip
+local function tooltipEnchantPhase(slot)
+    if not CreateFrame then return nil end
+    if not enchScanTip then
+        enchScanTip = CreateFrame("GameTooltip", "SoDPhaseLockEnchScanTip", nil, "GameTooltipTemplate")
+    end
+    enchScanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    enchScanTip:ClearLines()
+    if not pcall(enchScanTip.SetInventoryItem, enchScanTip, "player", slot) then return nil end
+    enchantPhaseByName = enchantPhaseByName or buildEnchantPhaseByName()
+    local latest
+    for i = 2, enchScanTip:NumLines() do
+        local fs = _G["SoDPhaseLockEnchScanTipTextLeft" .. i]
+        local t = fs and fs:GetText()
+        if t then
+            local r, g, b = fs:GetTextColor()
+            if r and g and b and r < 0.2 and g > 0.8 and b < 0.2 then
+                local phase = enchantPhaseByName[normalizeEnchName(t) or ""]
+                if phase and (not latest or phase > latest) then latest = phase end
+            end
+        end
+    end
+    return latest
+end
+
+-- If the equipped item in `slot` carries a permanent enchant that unlocks in a
+-- phase LATER than `activePhase`, return that unlock phase; else nil. The apply
+-- ID (field 2 of the item link) is a different namespace from the enchant spell
+-- IDs in Data/Enchants.lua, so this maps through ns.EnchantApplyPhases (the same
+-- data the Group Compliance tab uses).
+local function enchantViolationPhase(slot, activePhase)
+    if not GetInventoryItemLink then return nil end
+    if slot == INVSLOT_RELIC then return nil end   -- field 2 is a rune here, never a gear enchant
+    local link = GetInventoryItemLink("player", slot)
+    if not link then return nil end
+    local runeEnchID = slotRuneEnchantID(slot)
+
+    -- 1) Fast path: field 2 of the item link carries the enchant apply id. Skip it
+    -- when it IS the engraved rune (compare, not blanket-skip, so a coexisting
+    -- enchant that occupies field 2 is still judged).
+    local map = ns.EnchantApplyPhases
+    local applyID = tonumber((link:match("|Hitem:%d+:(%d+)")))
+    if map and applyID and applyID > 0 and applyID ~= runeEnchID then
+        local unlock = map[applyID]
+        if unlock and unlock > activePhase then return unlock end
+    end
+
+    -- 2) Tooltip fallback: only when this slot has a rune (the rune may occupy
+    -- field 2 and hide a coexisting enchant from step 1). Phase-check by name.
+    if runeEnchID then
+        local byName = tooltipEnchantPhase(slot)
+        if byName and byName > activePhase then return byName end
+    end
+    return nil
+end
+
 function Enforcement:CheckGear()
     if not Addon.db.profile.enabled then
         self.violations.gear = 0
+        self.violations.enchant = 0
         return
     end
     local phase = P()
     if not phase then return end
-    local block = Addon:AutoUnequip()
-    local count = 0
+    local block    = Addon:AutoUnequip()
+    local gearRule = enabled("gear")
+    local active   = Addon:GetActivePhase()
+    local count, enchantCount = 0, 0
     for slot = INVSLOT_FIRST, INVSLOT_LAST do
         local itemID = GetInventoryItemID("player", slot)
-        if itemID and itemViolatesInMode(itemID, phase) then
-            count = count + 1
+        if itemID then
             local link = select(2, GetItemInfo(itemID)) or ("item:" .. itemID)
-            if block then
-                Addon:Alert(link .. " can't be worn this phase — removing it.", "gear" .. slot)
-                self:Unequip(slot)
-            else
-                Addon:Alert(link .. " is not available at the current phase.", "gear" .. slot)
+            if itemViolatesInMode(itemID, phase) then
+                -- The item itself is over-phase — the enchant is moot, it's leaving.
+                count = count + 1
+                if block then
+                    Addon:Alert(link .. " can't be worn this phase — removing it.", "gear" .. slot)
+                    self:Unequip(slot)
+                else
+                    Addon:Alert(link .. " is not available at the current phase.", "gear" .. slot)
+                end
+            elseif gearRule and enchantViolationPhase(slot, active) then
+                -- Phase-legal item carrying a later-phase enchant: can't strip the
+                -- enchant, so unequip the whole piece.
+                enchantCount = enchantCount + 1
+                if block then
+                    Addon:Alert(link .. " carries an enchant from a later phase — removing it.", "gear" .. slot)
+                    self:Unequip(slot)
+                else
+                    Addon:Alert(link .. " carries an enchant from a later phase.", "gear" .. slot)
+                end
             end
         end
     end
     -- Report to guild compliance only when the gear rule is enforced (a pure
-    -- level-cap removal with the rule off is local-only).
-    if enabled("gear") then
-        self.violations.gear = count
+    -- level-cap removal with the rule off is local-only). The enchant check only
+    -- runs under the gear rule, so its count is already 0 when the rule is off.
+    if gearRule then
+        self.violations.gear    = count
+        self.violations.enchant = enchantCount
     else
-        self.violations.gear = 0
+        self.violations.gear    = 0
+        self.violations.enchant = 0
     end
 end
 

@@ -11,6 +11,91 @@ local GetContainerItemID   = (C and C.GetContainerItemID)   or _G.GetContainerIt
 -- Cache of overlays already attached to a button. Key = button frame, value = { tint, icon }.
 local overlayCache = {}
 
+-- Equip locations that can't carry a classic gear enchant from ns.EnchantApplyPhases.
+-- SoD rune-granting relics equip in the relic slot and stash their rune's enchant id
+-- in item-link field 2, so a map "match" on these item types is always a rune, not a
+-- later-phase enchant — the tooltip must not report it as one.
+local RELIC_RANGED_EQUIPLOC = {
+    INVTYPE_RELIC       = true,
+    INVTYPE_RANGED      = true,
+    INVTYPE_RANGEDRIGHT = true,
+    INVTYPE_THROWN      = true,
+}
+
+-- SoD engraving rune source items. A rune item lives in the phase bannedItems
+-- list (so the gear-rule overlay would flag it), but rune legality is governed by
+-- the SEPARATE "rune" rule. When that rule is off the player has opted out of rune
+-- restrictions, so a later-phase rune item must not be marked in bags.
+--
+-- C_Engraving is the authoritative "is this a rune item" signal (no locale-fragile
+-- name matching). GetRunes() only returns LEARNED runes, but the flagged item is
+-- usually a rune not yet engraved, so enumerate every rune for the class via the
+-- category API (onlyKnown = false); fall back to learned-only on older builds.
+-- Guarded throughout: on any miss the set is empty and behaviour is unchanged
+-- (the X still shows), so this can only ever suppress a genuine rune item.
+local runeItemSet   -- itemID -> true, lazily built + cached once non-empty
+
+local function buildRuneItemSet()
+    local set = {}
+    if not C_Engraving then return set end
+    if C_Engraving.GetRuneCategories and C_Engraving.GetRunesForCategory then
+        local ok, cats = pcall(C_Engraving.GetRuneCategories, false, false)
+        if ok and cats then
+            for _, cat in ipairs(cats) do
+                local ok2, runes = pcall(C_Engraving.GetRunesForCategory, cat, false)
+                if ok2 and runes then
+                    for _, rune in ipairs(runes) do
+                        if rune.itemID then set[rune.itemID] = true end
+                    end
+                end
+            end
+        end
+    end
+    -- Fallback for builds without the category API: learned runes only.
+    if not next(set) and C_Engraving.GetRunes then
+        local ok, runes = pcall(C_Engraving.GetRunes)
+        if ok and runes then
+            for _, rune in ipairs(runes) do
+                if rune.itemID then set[rune.itemID] = true end
+            end
+        end
+    end
+    return set
+end
+
+local function isRuneItem(itemID)
+    if not itemID then return false end
+    -- Rebuild while empty (engraving data can lag login); cache once populated.
+    if not runeItemSet or not next(runeItemSet) then
+        runeItemSet = buildRuneItemSet()
+    end
+    return runeItemSet[itemID] == true
+end
+
+-- SoD delivers some class runes as relic-slot items (Druid idols, Paladin librams,
+-- etc.). These carry no API that marks them as runes and NOT every relic is one, so
+-- there's no runtime signal to tell a rune relic from an ordinary stat relic — the
+-- authoritative allowlist lives in ns.RuneRelicPhases (Data/RuneRelics.lua). Like
+-- the engraving-rune items above, a rune relic's legality is a RUNE concern, not a
+-- gear one, so it's governed by the "rune" rule. Returns its unlock phase, or nil.
+local function runeRelicPhase(itemID)
+    if not (itemID and ns.RuneRelicPhases) then return nil end
+    return ns.RuneRelicPhases[itemID]
+end
+
+-- Items whose phase legality is governed by the "rune" rule rather than the gear
+-- rule: engraving rune items and rune-granting relics.
+local function isRuneGoverned(itemID)
+    return isRuneItem(itemID) or runeRelicPhase(itemID) ~= nil
+end
+
+-- True when itemID is rune-governed AND the player has the "rune" rule turned off,
+-- meaning rune restrictions don't apply and it must not be flagged.
+local function runeRestrictionOff(itemID)
+    if not isRuneGoverned(itemID) then return false end
+    return not Addon:RuleEnabled("rune")
+end
+
 -- Returns the earliest phase index at which itemID becomes legal, or nil if always allowed.
 local function getItemUnlockPhase(itemID)
     local reqLevel = select(5, GetItemInfo(itemID))
@@ -26,13 +111,26 @@ local function getItemUnlockPhase(itemID)
 end
 
 -- Returns true if itemID is illegal at the currently active phase.
--- Gear rule enabled: checks bannedItems + req-level (full enforcement signal).
--- Gear rule off: checks req-level only (pure level-cap indicator, no enforcement).
+-- Rune-governed (engraving runes + rune-granting relics): gated by the "rune" rule
+--   alone — flagged only when that rule is on AND the item is later-phase. The gear
+--   rule never flags them, so a player who opts out of runes sees no X on an idol.
+-- Otherwise, gear rule enabled: bannedItems + req-level (full enforcement signal);
+--   gear rule off: req-level only (pure level-cap indicator, no enforcement).
 local function isBagViolation(itemID)
     if not itemID then return false end
     if not (Addon.db and Addon.db.profile.enabled) then return false end
     local phase = Addon:GetPhaseData()
     if not phase then return false end
+    if isRuneGoverned(itemID) then
+        if not Addon:RuleEnabled("rune") then return false end
+        -- Rune relic: violation iff its rune unlocks LATER than the active phase.
+        local relicPhase = runeRelicPhase(itemID)
+        if relicPhase then
+            local active = Addon:GetActivePhase()
+            return active ~= nil and relicPhase > active
+        end
+        return ns.ItemViolatesPhase(itemID, phase)   -- engraving rune item
+    end
     if Addon:RuleEnabled("gear") then
         return ns.ItemViolatesPhase(itemID, phase)
     else
@@ -157,8 +255,17 @@ GameTooltip:HookScript("OnTooltipSetItem", function(tooltip)
     local phase = Addon:GetPhaseData()
     if not phase then return end
 
-    -- The item itself.
-    if ns.ItemViolatesPhase(itemID, phase) then
+    -- The item itself. A rune-governed item (engraving rune or rune-granting relic)
+    -- is restricted only when the "rune" rule is on; suppress otherwise (matches the
+    -- bag X). A rune relic reports its authoritative unlock phase as a rune.
+    local relicPhase = runeRelicPhase(itemID)
+    if relicPhase then
+        local active = Addon:GetActivePhase()
+        if Addon:RuleEnabled("rune") and active and relicPhase > active then
+            tooltip:AddLine(string.format("|cffff4040SoD Phase Lock:|r Rune unlocks in %s.",
+                ns.Phases[relicPhase].name))
+        end
+    elseif not runeRestrictionOff(itemID) and ns.ItemViolatesPhase(itemID, phase) then
         local unlockIdx = getItemUnlockPhase(itemID)
         if unlockIdx then
             tooltip:AddLine(string.format("|cffff4040SoD Phase Lock:|r Item unlocks in %s.",
@@ -171,9 +278,15 @@ GameTooltip:HookScript("OnTooltipSetItem", function(tooltip)
     -- The applied permanent enchant (field 2 of the item link is the apply ID,
     -- a different namespace from the enchant spell IDs; mapped in
     -- Data/EnchantApplyPhases.lua). 0 = no enchant.
+    --
+    -- SoD engraved runes ride in this same field-2 slot as an enchant. A rune-
+    -- granting relic (idol/libram/totem/sigil) or a ranged weapon can never carry
+    -- a classic gear enchant from the map, so a match there is always a rune and
+    -- must not be reported as a later-phase enchant — suppress the line by equipLoc.
     local activeIdx = Addon:GetActivePhase()
     local enchantID = tonumber(link:match("item:%d+:(%d+)"))
-    if activeIdx and enchantID and enchantID ~= 0 then
+    local equipLoc  = select(9, GetItemInfo(itemID))
+    if activeIdx and enchantID and enchantID ~= 0 and not RELIC_RANGED_EQUIPLOC[equipLoc or ""] then
         local enchUnlock = ns.EnchantApplyPhases and ns.EnchantApplyPhases[enchantID]
         if enchUnlock and enchUnlock > activeIdx then
             tooltip:AddLine(string.format("|cffff4040SoD Phase Lock:|r Enchant unlocks in %s.",
@@ -186,7 +299,11 @@ end)
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("BAG_UPDATE_DELAYED")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:SetScript("OnEvent", function() updateBagOverlays() end)
+eventFrame:SetScript("OnEvent", function(_, event)
+    -- Engraving data can lag login; drop the cache so it rebuilds on next use.
+    if event == "PLAYER_ENTERING_WORLD" then runeItemSet = nil end
+    updateBagOverlays()
+end)
 
 -- ---------------------------------------------------------------------------
 -- Baganator integration.
@@ -281,6 +398,7 @@ end
 
 -- Called by Core:ApplyRuleset when the phase or mode changes.
 ns.RefreshBagOverlays = function()
+    runeItemSet = nil      -- rebuild the rune-item set (rune rule may have changed)
     updateBagOverlays()    -- default Blizzard bags
     refreshBaganator()     -- Baganator views, if installed + active
 end

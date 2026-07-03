@@ -279,14 +279,40 @@ local function BuildGroupRows(scroll)
 end
 
 -- ---------------------------------------------------------------------------
+-- Preserve scroll position across a rebuild. A rebuild releases + re-adds every
+-- row; during the relayout the momentarily-short content makes the ScrollFrame
+-- hide its scrollbar and SetValue(0), which zeroes the stored offset — so the
+-- list snaps to the top. We capture the scroll value before rebuilding and
+-- restore it once layout has settled (SetScroll / FixScroll are inverse via the
+-- offset, so a restore at final height is stable). Without this, a status ping
+-- from any guildmate (~every heartbeat) would yank the list up mid-read.
+local function scrollValue(scroll)
+    local status = scroll and (scroll.status or scroll.localstatus)
+    return (status and status.scrollvalue) or 0
+end
+
+local function restoreScroll(scroll, value)
+    if not (scroll and value and value > 0) then return end
+    if not (C_Timer and C_Timer.After) then return end
+    C_Timer.After(0, function()
+        -- Bail if the window closed or the tab was swapped out meanwhile.
+        if not (frame and frame.scroll == scroll and scroll.frame) then return end
+        scroll:SetScroll(value)
+        if scroll.scrollbar then scroll.scrollbar:SetValue(value) end
+    end)
+end
+
 local function rebuildActiveTab()
     if not (frame and frame.scroll) then return end
-    frame.scroll:ReleaseChildren()
+    local scroll = frame.scroll
+    local prev = scrollValue(scroll)
+    scroll:ReleaseChildren()
     if frame.activeTab == "group" then
-        BuildGroupRows(frame.scroll)
+        BuildGroupRows(scroll)
     else
-        BuildGuildRows(frame.scroll)
+        BuildGuildRows(scroll)
     end
+    restoreScroll(scroll, prev)
 end
 
 function ns.RefreshRoster()
@@ -317,11 +343,11 @@ function ns.ToggleRoster()
     })
     tabs:SetCallback("OnGroupSelected", function(container, _, group)
         container:ReleaseChildren()
+        frame.activeTab = group
         local scroll = AceGUI:Create("ScrollFrame")
         scroll:SetLayout("List")
         container:AddChild(scroll)
         frame.scroll = scroll
-        frame.activeTab = group
         -- Auto-inspect only while the Group tab is the one being viewed.
         if ns.GroupInspect then ns.GroupInspect:SetActive(group == "group") end
         rebuildActiveTab()

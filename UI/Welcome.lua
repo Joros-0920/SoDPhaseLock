@@ -15,7 +15,7 @@ local AUTHENTIC_RULES = { "instance", "gear", "profession", "quest", "rune", "ru
 -- Authentic = level cap + all authentic rules. A guild leader writes the guild
 -- enforcement config and broadcasts it; everyone else sets their personal challenges.
 local function applyMode(mode, frame)
-    Addon.db.profile.seenWelcome = true
+    Addon.db.char.seenWelcome = true
     local wantAuthentic = (mode == "authentic")
 
     if Addon:IsGuildLeader() then
@@ -112,7 +112,7 @@ local function buildWelcomeFrame()
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", 2, 2)
     closeBtn:SetScript("OnClick", function()
-        Addon.db.profile.seenWelcome = true
+        Addon.db.char.seenWelcome = true
         f:Hide()
         welcomeFrame = nil
     end)
@@ -171,7 +171,7 @@ local function buildWelcomeFrame()
 end
 
 function ns.ShowWelcome()
-    if Addon.db.profile.seenWelcome then return end
+    if Addon.db.char.seenWelcome then return end
     if not welcomeFrame then buildWelcomeFrame() end
     welcomeFrame:Show()
 end
