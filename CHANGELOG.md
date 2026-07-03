@@ -4,6 +4,14 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.6.2] - 2026-07-03
+
+### Added
+- **Fel Portal ("Otherworldly Treasures") BoE drops are now correctly phased.** These items were added in a later phase but have low required-level ranges, and the addon's bulk item import had wrongly treated every one of them as strictly "later phase" — so a guild locked to the item's own phase would have its members' gear flagged/removed for using them. Each Fel Portal BoE is now bucketed to the phase it's actually intended for (Phase 1, 2 or 3), so it's allowed from that phase onward and blocked only before it.
+- **New "Fel Portal Drops" section in the Overview panel** listing the BoEs that can be found from Otherworldly Treasures in the current phase (icons with hover tooltips and click-to-link, like the other Overview sections).
+
+---
+
 ## [0.6.1] - 2026-07-03
 
 ### Fixed

@@ -160,6 +160,8 @@ do
           src = "PhaseCraftedEpics" },
         { label = "|cffffd100New Consumes|r\n|cff888888New consumables \226\128\148 hover for details.|r",
           src = "PhaseNewConsumes" },
+        { label = "|cffffd100Fel Portal Drops|r\n|cff888888BoEs from Otherworldly Treasures \226\128\148 hover for details.|r",
+          src = "FelPortalDrops" },
     }
 
     local function Relayout(self)
@@ -1524,7 +1526,7 @@ if GetItemInfo then
             if type(v) == "table" then warm(v.items or v) else GetItemInfo(v) end
         end
     end
-    for _, tbl in ipairs({ ns.PhaseRaidDrops, ns.PhaseCraftedEpics, ns.PhaseNewConsumes }) do
+    for _, tbl in ipairs({ ns.PhaseRaidDrops, ns.PhaseCraftedEpics, ns.PhaseNewConsumes, ns.FelPortalDrops }) do
         for _, list in pairs(tbl or {}) do warm(list) end
     end
 end
