@@ -302,8 +302,48 @@ local function restoreScroll(scroll, value)
     end)
 end
 
-local function rebuildActiveTab()
+-- Signature of the data that is actually visible on the active tab. A status ping
+-- arrives roughly every heartbeat, but the vast majority don't change anything on
+-- screen (same level / phase / status), so rebuilding on every one just makes the
+-- list flicker. We compare this signature and skip the teardown when it's
+-- unchanged, so a rebuild (and its momentary flicker) only happens on a real
+-- change. \1 separates fields, \2 separates rows — neither appears in the data.
+local function contentSignature()
+    if not frame then return "" end
+    local parts = {}
+    if frame.activeTab == "group" then
+        local GI = ns.GroupInspect
+        parts[#parts + 1] = "grp"
+        parts[#parts + 1] = (GI and GI:InGroup()) and "1" or "0"
+        parts[#parts + 1] = (GI and GI:IsScanning()) and "s" or ""
+        local list = (GI and GI:GetResults()) or {}
+        for _, e in ipairs(list) do
+            local i = e.info
+            parts[#parts + 1] = table.concat({
+                e.name, tostring(i.level or "?"), tostring(i.class or "?"),
+                i.scanned and "1" or "0", i.compliant and "1" or "0",
+                i.reasons or "",
+            }, "\1")
+        end
+    else
+        parts[#parts + 1] = "gld"
+        local list = (ns.Compliance and ns.Compliance:GetSorted()) or {}
+        for _, e in ipairs(list) do
+            local i = e.info
+            parts[#parts + 1] = table.concat({
+                e.name, tostring(i.level or "?"), tostring(i.phase or "?"),
+                tostring(i.mode or "?"), i.xpLocked and "1" or "0",
+                i.compliant and "1" or "0", i.reasons or "",
+            }, "\1")
+        end
+    end
+    return table.concat(parts, "\2")
+end
+
+local function rebuildActiveTab(force)
     if not (frame and frame.scroll) then return end
+    local sig = contentSignature()
+    if not force and sig == frame.lastSig then return end   -- nothing visible changed
     local scroll = frame.scroll
     local prev = scrollValue(scroll)
     scroll:ReleaseChildren()
@@ -312,11 +352,24 @@ local function rebuildActiveTab()
     else
         BuildGuildRows(scroll)
     end
+    frame.lastSig = sig
     restoreScroll(scroll, prev)
 end
 
+-- Coalesce bursts of refresh requests (e.g. many guildmates reporting at once)
+-- into a single rebuild, so a ping storm can't rebuild the list many times a
+-- second. Combined with the signature check above, a steady stream of unchanged
+-- pings produces no rebuilds at all.
 function ns.RefreshRoster()
-    rebuildActiveTab()
+    if not frame then return end
+    if not (C_Timer and C_Timer.After) then rebuildActiveTab(); return end
+    if frame.refreshPending then return end
+    frame.refreshPending = true
+    C_Timer.After(0.2, function()
+        if not frame then return end
+        frame.refreshPending = false
+        rebuildActiveTab()
+    end)
 end
 
 function ns.ToggleRoster()
@@ -350,7 +403,7 @@ function ns.ToggleRoster()
         frame.scroll = scroll
         -- Auto-inspect only while the Group tab is the one being viewed.
         if ns.GroupInspect then ns.GroupInspect:SetActive(group == "group") end
-        rebuildActiveTab()
+        rebuildActiveTab(true)   -- fresh scroll frame — always build
     end)
     frame:AddChild(tabs)
 

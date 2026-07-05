@@ -4,6 +4,18 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.6.4] - 2026-07-05
+
+### Fixed
+- **The Compliance window no longer flickers on every update.** The Guild/Group Compliance list was fully torn down and rebuilt each time any guildmate's status ping arrived (~every heartbeat), even when nothing on screen had actually changed — so a large guild made the list flicker constantly. The list now rebuilds only when the visible data actually changes, and rapid bursts of reports are coalesced into a single rebuild, so a steady stream of unchanged pings produces no visible flicker.
+- **Low-skill enchants are no longer flagged as "later phase."** Several enchants that require only ≤ 150 enchanting skill were bucketed to Phase 2, so under a Phase 1 lock they were flagged (and, with "block over-phase gear" on, the whole piece was removed): *Enchant Weapon - Lesser Striking*, *Chest - Minor Stats*, *Gloves - Mining / Herbalism / Fishing*, *2H Weapon - Lesser Impact*, and *Bracer - Lesser Strength / Lesser Stamina*. They're now correctly available from Phase 1. (Two of them share an internal enchant ID with a genuinely later enchant — *Weapon - Striking* and *Boots/Shield - Lesser Stamina* — so those siblings are no longer enforced in earlier phases, since the game can't tell the two apart from the item link and this avoids ever falsely removing the legal low-skill enchant.)
+
+### Changed
+- **The Available Enchants window now refreshes when you change gear.** Equipping, unequipping or swapping a piece now rebuilds the paper doll live, so each slot's item, enchant outline (green/red) and current-enchant label stay in sync with what you're wearing.
+- **Minimap button clicks swapped:** **left-click** now opens the main window, **right-click** opens the compliance roster (previously reversed).
+
+---
+
 ## [0.6.3] - 2026-07-03
 
 ### Fixed

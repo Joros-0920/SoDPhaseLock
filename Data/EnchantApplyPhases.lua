@@ -24,16 +24,17 @@ local ADDON, ns = ...
 -- =========================================================================
 
 ns.EnchantApplyPhases = {
-    [241] = 2,  -- Weapon-LesserStriking
+    -- 241 Weapon-LesserStriking omitted: skill 140 is craftable under P1's 150 cap (P1 = never a violation).
     [255] = 2,  -- Boots-LesserSpirit
-    [724] = 2,  -- Bracer-LesserStamina, Boots-LesserStamina, Shield-LesserStamina
+    -- 724 omitted: Bracer-LesserStamina is P1 (skill <= 150); earliest-wins collapses the shared ID to
+    -- P1, so Boots-/Shield-LesserStamina (same ID 724) are under-flagged rather than false-flag the bracer.
     [803] = 3,  -- Weapon-FieryWeapon
     [805] = 3,  -- Weapon-GreaterStriking
-    [823] = 2,  -- Bracer-LesserStrength
-    [844] = 2,  -- Gloves-Mining
-    [845] = 2,  -- Gloves-Herbalism
-    [846] = 2,  -- Gloves-Fishing
-    [847] = 2,  -- Chest-MinorStats
+    -- 823 Bracer-LesserStrength omitted: P1 (skill <= 150), never a violation.
+    -- 844 Gloves-Mining omitted: P1 (skill <= 150), never a violation.
+    -- 845 Gloves-Herbalism omitted: P1 (skill <= 150), never a violation.
+    -- 846 Gloves-Fishing omitted: P1 (skill <= 150), never a violation.
+    -- 847 Chest-MinorStats omitted: P1 (skill <= 150), never a violation.
     [848] = 2,  -- Cloak-Defense
     [849] = 2,  -- Cloak-LesserAgility, Boots-LesserAgility
     [850] = 2,  -- Chest-GreaterHealth
@@ -66,7 +67,8 @@ ns.EnchantApplyPhases = {
     [929] = 3,  -- Bracer-GreaterStamina, Boots-GreaterStamina, Shield-GreaterStamina
     [930] = 3,  -- Gloves-RidingSkill
     [931] = 3,  -- Gloves-MinorHaste
-    [943] = 2,  -- Weapon-Striking, 2HWeapon-LesserImpact
+    -- 943 omitted: 2HWeapon-LesserImpact is P1 (skill <= 150); earliest-wins collapses the shared ID to
+    -- P1, so Weapon-Striking (same ID 943) is under-flagged rather than false-flag the 2H impact enchant.
     [963] = 3,  -- 2HWeapon-GreaterImpact
     [1883] = 3,  -- Bracer-GreaterIntellect
     [1884] = 3,  -- Bracer-SuperiorSpirit

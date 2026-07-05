@@ -1093,11 +1093,29 @@ do
         }
         for k, v in pairs(enchMethods) do widget[k] = v end
         frame.obj = widget
-        -- Keep the shopping list's bag counts / strike-throughs live as the
-        -- player's bags change (only while shown and something is selected).
+        -- Keep the panel live while shown: bag changes refresh the shopping
+        -- list's counts/strike-throughs; equipment changes rebuild the paper doll
+        -- so each slot's item, enchant outline, and current-enchant label track
+        -- what the player is actually wearing.
         frame:RegisterEvent("BAG_UPDATE_DELAYED")
-        frame:SetScript("OnEvent", function(self)
-            if self:IsShown() and self.obj and next(selection) then RenderPane(self.obj) end
+        frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+        frame:SetScript("OnEvent", function(self, event)
+            local w = self.obj
+            if not (self:IsShown() and w) then return end
+            if event == "PLAYER_EQUIPMENT_CHANGED" then
+                -- A single swap fires this once per affected slot; coalesce the
+                -- burst into one relayout on the next frame.
+                if not w._gearRefreshPending then
+                    w._gearRefreshPending = true
+                    local function doRefresh()
+                        w._gearRefreshPending = nil
+                        if frame:IsShown() then RelayoutEnchants(w) end
+                    end
+                    if C_Timer and C_Timer.After then C_Timer.After(0.1, doRefresh) else doRefresh() end
+                end
+            elseif next(selection) then
+                RenderPane(w)
+            end
         end)
         return AceGUI:RegisterAsWidget(widget)
     end
@@ -1615,16 +1633,16 @@ function ns.SetupOptions()
             icon = "Interface\\Icons\\inv_misc_pocketwatch_01",
             OnClick = function(_, button)
                 if button == "RightButton" then
-                    ns.OpenOptions()
-                else
                     if ns.ToggleRoster then ns.ToggleRoster() end
+                else
+                    ns.OpenOptions()
                 end
             end,
             OnTooltipShow = function(tt)
                 local d = Addon:GetPhaseData()
                 tt:AddLine("SoD Phase Lock")
                 tt:AddLine(string.format("%s — %s mode", d and d.name or "?", Addon:GetMode()), 1, 1, 1)
-                tt:AddLine("Left-click: roster   Right-click: options", 0.7, 0.7, 0.7)
+                tt:AddLine("Left-click: options   Right-click: roster", 0.7, 0.7, 0.7)
             end,
         })
         LibDBIcon:Register(APP, dataobj, Addon.db.profile.minimap)

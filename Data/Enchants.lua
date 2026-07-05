@@ -35,6 +35,7 @@ ns.PhaseEnchants = {
             { 7857, "Enchant Chest - Health" },
             { 13538, "Enchant Chest - Lesser Absorption" },
             { 13607, "Enchant Chest - Mana" },
+            { 13626, "Enchant Chest - Minor Stats" },  -- skill <= 150
         } },
         { label = "Bracer", items = {
             { 7418, "Enchant Bracer - Minor Health" },
@@ -44,7 +45,14 @@ ns.PhaseEnchants = {
             { 7779, "Enchant Bracer - Minor Agility" },
             { 7782, "Enchant Bracer - Minor Strength" },
             { 7859, "Enchant Bracer - Lesser Spirit" },
+            { 13501, "Enchant Bracer - Lesser Stamina" },  -- skill <= 150
+            { 13536, "Enchant Bracer - Lesser Strength" },  -- skill <= 150
             { 13622, "Enchant Bracer - Lesser Intellect" },
+        } },
+        { label = "Gloves", items = {
+            { 13612, "Enchant Gloves - Mining" },  -- skill <= 150
+            { 13617, "Enchant Gloves - Herbalism" },  -- skill <= 150
+            { 13620, "Enchant Gloves - Fishing" },  -- skill <= 150
         } },
         { label = "Boots", items = {
             { 7863, "Enchant Boots - Minor Stamina" },
@@ -58,11 +66,13 @@ ns.PhaseEnchants = {
         { label = "Weapon", items = {
             { 7786, "Enchant Weapon - Minor Beastslayer" },
             { 7788, "Enchant Weapon - Minor Striking" },
+            { 13503, "Enchant Weapon - Lesser Striking" },  -- skill 140, valid under P1's 150 cap
         } },
         { label = "2H Weapon", items = {
             { 7745, "Enchant 2H Weapon - Minor Impact" },
             { 7793, "Enchant 2H Weapon - Lesser Intellect" },
             { 13380, "Enchant 2H Weapon - Lesser Spirit" },
+            { 13529, "Enchant 2H Weapon - Lesser Impact" },  -- skill <= 150
         } },
     },
 
@@ -76,7 +86,6 @@ ns.PhaseEnchants = {
             { 13882, "Enchant Cloak - Lesser Agility" },
         } },
         { label = "Chest", items = {
-            { 13626, "Enchant Chest - Minor Stats" },
             { 13640, "Enchant Chest - Greater Health" },
             { 13663, "Enchant Chest - Greater Mana" },
             { 13700, "Enchant Chest - Lesser Stats" },
@@ -84,8 +93,6 @@ ns.PhaseEnchants = {
             { 435903, "Enchant Chest - Retricutioner" },  -- SoD (Formula spell 435902)
         } },
         { label = "Bracer", items = {
-            { 13501, "Enchant Bracer - Lesser Stamina" },
-            { 13536, "Enchant Bracer - Lesser Strength" },
             { 13642, "Enchant Bracer - Spirit" },
             { 13646, "Enchant Bracer - Lesser Deflection" },
             { 13648, "Enchant Bracer - Stamina" },
@@ -94,9 +101,6 @@ ns.PhaseEnchants = {
             { 13846, "Enchant Bracer - Greater Spirit" },
         } },
         { label = "Gloves", items = {
-            { 13612, "Enchant Gloves - Mining" },
-            { 13617, "Enchant Gloves - Herbalism" },
-            { 13620, "Enchant Gloves - Fishing" },
             { 13698, "Enchant Gloves - Skinning" },
             { 13815, "Enchant Gloves - Agility" },
             { 13841, "Enchant Gloves - Advanced Mining" },
@@ -116,7 +120,6 @@ ns.PhaseEnchants = {
             { 13817, "Enchant Shield - Stamina" },
         } },
         { label = "Weapon", items = {
-            { 13503, "Enchant Weapon - Lesser Striking" },
             { 13653, "Enchant Weapon - Lesser Beastslayer" },
             { 13655, "Enchant Weapon - Lesser Elemental Slayer" },
             { 13693, "Enchant Weapon - Striking" },
@@ -124,7 +127,6 @@ ns.PhaseEnchants = {
             { 435481, "Enchant Weapon - Dismantle" },  -- SoD (Formula spell 435484)
         } },
         { label = "2H Weapon", items = {
-            { 13529, "Enchant 2H Weapon - Lesser Impact" },
             { 13695, "Enchant 2H Weapon - Impact" },
         } },
     },
