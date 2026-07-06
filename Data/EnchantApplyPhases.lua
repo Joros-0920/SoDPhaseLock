@@ -25,7 +25,9 @@ local ADDON, ns = ...
 
 ns.EnchantApplyPhases = {
     -- 241 Weapon-LesserStriking omitted: skill 140 is craftable under P1's 150 cap (P1 = never a violation).
-    [255] = 2,  -- Boots-LesserSpirit
+    -- 255 omitted: shared "Spirit +3" ID also applied by P1 Lesser Spirit enchants (2H Weapon 13380,
+    -- Bracer 7859, Shield 13485). Earliest-wins collapses it to P1, so Boots-LesserSpirit (same ID) is
+    -- under-flagged rather than false-flag the P1 weapon/bracer/shield twins.
     -- 724 omitted: Bracer-LesserStamina is P1 (skill <= 150); earliest-wins collapses the shared ID to
     -- P1, so Boots-/Shield-LesserStamina (same ID 724) are under-flagged rather than false-flag the bracer.
     [803] = 3,  -- Weapon-FieryWeapon
@@ -35,7 +37,9 @@ ns.EnchantApplyPhases = {
     -- 845 Gloves-Herbalism omitted: P1 (skill <= 150), never a violation.
     -- 846 Gloves-Fishing omitted: P1 (skill <= 150), never a violation.
     -- 847 Chest-MinorStats omitted: P1 (skill <= 150), never a violation.
-    [848] = 2,  -- Cloak-Defense
+    -- 848 omitted: "Armor +30" ID also applied by P1 Shield-LesserProtection (13464). Earliest-wins
+    -- collapses it to P1, so Cloak-Defense (same ID, differently named) is under-flagged rather than
+    -- false-flag the P1 shield enchant.
     [849] = 2,  -- Cloak-LesserAgility, Boots-LesserAgility
     [850] = 2,  -- Chest-GreaterHealth
     [851] = 2,  -- Bracer-Spirit, Shield-Spirit, Boots-Spirit

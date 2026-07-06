@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.6.5] - 2026-07-05
+
+### Fixed
+- **More Phase-1 enchants no longer flagged as "later phase."** A full audit of every Phase-1 enchant against the internal enchant-ID table found two more that were being flagged (and, with "block over-phase gear" on, removed) under an earlier-phase lock — because they share an internal enchant ID with a genuinely later enchant on a *different* slot: **Lesser Spirit** (2H Weapon / Bracer / Shield — shares the "Spirit +3" ID with *Boots - Lesser Spirit*) and **Shield - Lesser Protection** (shares the "Armor +30" ID with *Cloak - Defense*, despite the different name). Both are now correctly available from Phase 1. As with the 0.6.4 cases, the genuinely-later siblings (*Boots - Lesser Spirit*, *Cloak - Defense*) are no longer enforced in earlier phases, since the game can't tell them apart from the item link.
+
+---
+
 ## [0.6.4] - 2026-07-05
 
 ### Fixed
