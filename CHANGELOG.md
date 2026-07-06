@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.6.6] - 2026-07-06
+
+### Fixed
+- **Members no longer stay stuck showing "out-of-sync ruleset."** A member who missed a ruleset broadcast because they were loading in, briefly out of range, or the guild-channel message got dropped could sit flagged as out-of-sync in the Compliance roster indefinitely, since the only resync retry ran once shortly after login. Every member now notices when a guildmate's regular status update reports a newer ruleset than their own and quietly asks the guild to resend it, so stragglers catch up on their own within a minute or two without needing to relog. The extra request is throttled and answered just once guild-wide, so it adds no meaningful channel traffic even in large guilds.
+
+---
+
 ## [0.6.5] - 2026-07-05
 
 ### Fixed

@@ -74,6 +74,30 @@ function Comm:RequestSync()
     send({ t = "REQ" })
 end
 
+-- A peer's status ping reports a newer ruleset epoch than ours: we missed a
+-- broadcast (were loading, out of comm range, or the "R" got rate-limited) and
+-- would otherwise show as "out-of-sync" forever, since the login REQ retry only
+-- fires while epoch is still 0. Ask the guild to resend.
+--
+-- Throttled to one in-flight request, jittered, and suppressed right after we've
+-- heard an authoritative ruleset so a wave of stragglers doesn't storm the
+-- channel. The reply is officer-validated and epochs are monotonic
+-- (ApplyRuleset rejects anything <= ours), so a stale answer can't set us back.
+function Comm:MaybeResync()
+    if self.resyncTimer then return end                                        -- already asking
+    if self.lastRulesetSeen and (GetTime() - self.lastRulesetSeen) < REQ_SUPPRESS then
+        return                                                                 -- just heard one; give it a beat
+    end
+    self.resyncTimer = self:ScheduleTimer(function()
+        self.resyncTimer = nil
+        -- An "R" may have caught us up while we waited — only ask if still quiet.
+        if self.lastRulesetSeen and (GetTime() - self.lastRulesetSeen) < REQ_SUPPRESS then
+            return
+        end
+        self:RequestSync()
+    end, 1 + math.random() * REQ_SPREAD)
+end
+
 -- Count of *online* guild members — the number of clients actually sending, and
 -- the driver for our adaptive cadence. Returns nil until the roster has loaded
 -- (GetNumGuildMembers is 0 pre-load) so callers can fall back conservatively.
@@ -265,6 +289,12 @@ function Comm:OnComm(prefix, message, distribution, sender)
         end, math.random() * REQ_SPREAD)
 
     elseif data.t == "S" then
+        -- Someone reports a newer ruleset than we hold: we're a straggler that
+        -- missed a broadcast. Self-heal by requesting a resend instead of sitting
+        -- flagged out-of-sync until relog.
+        if sender ~= me and (data.epoch or 0) > Addon:GetRuleset().epoch then
+            self:MaybeResync()
+        end
         if ns.Compliance then
             ns.Compliance:Record(sender, data)
         end
