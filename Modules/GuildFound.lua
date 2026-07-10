@@ -1,0 +1,452 @@
+local ADDON, ns = ...
+local Addon = ns.Addon
+local GuildFound = Addon:NewModule("GuildFound", "AceEvent-3.0")
+ns.GuildFound = GuildFound
+
+-- ---------------------------------------------------------------------------
+-- "Guild Found" — an optional closed-economy policy set by the guild leader and
+-- synced to all members (rides on the ruleset, see Core.lua Addon:GuildFound()).
+-- Each restriction is an independent toggle:
+--   trade   — trades with fellow guild members are unrestricted; trades with anyone
+--             outside your guild (or any trade at all if you have no guild) may carry
+--             only allowlisted items and never gold, and enchant/lockpick services
+--             (an item in the "will not be traded" slot) are blocked too. See
+--             UI/TradeExceptions.lua.
+--   mail    — may only send mail to fellow guild members; mail received from anyone
+--             outside your guild is locked (can't be opened or looted)
+--   auction — may not use the Auction House
+-- Enforcement is best-effort client-side (the addon's honor-system model): outbound
+-- actions are hard-blocked by cancelling/closing the relevant window (or aborting
+-- the global), inbound mail is warned about only. See PROGRESS.md → integrity model.
+-- ---------------------------------------------------------------------------
+
+-- A restriction is live only when the local master switch is on AND the guild has
+-- that specific toggle enabled. When not in a guild, guildFound reads the "" bucket
+-- (all false), so none of the handlers below ever fire for a solo player.
+local function active(key)
+    return Addon.db.profile.enabled and Addon:GuildFound(key)
+end
+
+-- Is `name` a member of our guild? Reuses the roster walk + short-name match in
+-- Core.lua (returns nil for non-members and for anyone when we're guildless).
+local function isGuildmate(name)
+    if not name or name == "" then return false end
+    return Addon:GetGuildRankIndex(name) ~= nil
+end
+
+-- Is the inbox mail at `index` blocked by the closed-economy rule?
+--   * Auction House mail (proceeds, won auctions, outbid/expired refunds) is ALWAYS
+--     blocked when the mail rule is active — with the AH disabled we never want any
+--     path to open AH mail. Matched on "Auction House" in the sender name ("Alliance/
+--     Horde/Neutral Auction House"); locale-fragile (enUS), like other name matches.
+--   * Otherwise only player-to-player mail from a non-guildmate is blocked. Ordinary
+--     NPC/system/quest mail is exempt: some of it carries a sender name (quest rewards,
+--     vendor buyback), so a name check alone would wrongly trap it. GetInboxHeaderInfo's
+--     `canReply` (field 12) is truthy only for real player mail — the reliable
+--     player-vs-NPC discriminator.
+local function mailFromOutsider(index)
+    if not index then return false end
+    local _, _, sender, _, _, _, _, _, _, _, _, canReply = GetInboxHeaderInfo(index)
+    if sender and sender:find("Auction House", 1, true) then return true end
+    if not canReply then return false end
+    return sender ~= nil and not isGuildmate(sender)
+end
+
+-- Can this inbox mail be returned to its sender? Only replyable player mail has a valid
+-- return recipient — AH/system mail (which we still block) can't be returned, so its
+-- "Return" button must be hidden. `canReply` (field 12) is that signal.
+local function mailReturnable(index)
+    if not index then return false end
+    local canReply = select(12, GetInboxHeaderInfo(index))
+    return canReply and true or false
+end
+
+-- Up to 6 tradeable slots per side. The 7th "will not be traded" slot never
+-- transfers an item, but it IS how an enchant or lockpick is cast on a partner's
+-- item — a service across the guild boundary, so under the trade rule it's blocked
+-- too (an item parked there with a non-guildmate can't complete the trade).
+local TRADE_ITEM_SLOTS = 6
+local TRADE_SERVICE_SLOT = 7
+
+-- Conjured items (mage food/water, healthstones, soulstones, …) aren't exposed by
+-- GetItemInfo, but they carry the "Conjured Item" line (ITEM_CONJURED) in their
+-- tooltip. Scan a private hidden tooltip for it. Items in a trade are in the
+-- player's possession, so their tooltip data is cached and resolves synchronously.
+local scanTip
+local function ensureScanTip()
+    if not scanTip then
+        scanTip = CreateFrame("GameTooltip", "SoDPLGuildFoundScanTip", nil, "GameTooltipTemplate")
+        scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    end
+    return scanTip
+end
+
+local function isConjuredLink(link)
+    if not link or not ITEM_CONJURED then return false end
+    local tip = ensureScanTip()
+    tip:ClearLines()
+    tip:SetHyperlink(link)
+    local lines = tip:NumLines()
+    for i = 2, lines do
+        local fs = _G["SoDPLGuildFoundScanTipTextLeft" .. i]
+        if fs and fs:GetText() == ITEM_CONJURED then return true end
+    end
+    -- Items the trade PARTNER added may not be cached on our client, so the tooltip
+    -- comes back empty (a real item tooltip always has a name line + more). We can't
+    -- tell it's conjured yet, so it fails safe as "not conjured" → blocked for now;
+    -- warm the cache with GetItemInfo (fires GET_ITEM_INFO_RECEIVED → re-EvaluateTrade)
+    -- so the decision is corrected once the data arrives, rather than spuriously stuck.
+    if lines < 2 and GetItemInfo then GetItemInfo(link) end
+    return false
+end
+
+-- Items still inside their group-loot trade window (bind-on-pickup drops that may be
+-- traded to players who were also eligible to loot them, for ~2h) carry the
+-- BIND_TRADE_TIME_REMAINING line ("You may trade this item with players that were also
+-- eligible to loot this item for the next %s"). That timer is INSTANCE state, not part
+-- of the item link, so — unlike the conjured check — we must scan the live trade SLOT
+-- (SetTradePlayerItem/SetTradeTargetItem), not a hyperlink. Build a Lua pattern from the
+-- format string once: escape its magic chars, turn the %s placeholder into a wildcard,
+-- so the match is locale-correct.
+local bindTradePattern
+do
+    local fmt = BIND_TRADE_TIME_REMAINING
+    if type(fmt) == "string" then
+        bindTradePattern = fmt
+            :gsub("%%[%d%$]*%a", "\1")                    -- format specifiers -> sentinel
+            :gsub("[%^%$%(%)%.%[%]%*%+%-%?%%]", "%%%0")    -- escape pattern magic
+            :gsub("\1", ".-")                             -- sentinel -> wildcard
+    end
+end
+
+-- Is the item in trade slot `index` on `side` ("player"/"target") still tradeable via
+-- its group-loot window? Scans that slot's tooltip for the BIND_TRADE line.
+local function slotInTradeWindow(side, index)
+    if not bindTradePattern then return false end
+    local tip = ensureScanTip()
+    tip:ClearLines()
+    if side == "player" then
+        if not tip.SetTradePlayerItem then return false end
+        tip:SetTradePlayerItem(index)
+    else
+        if not tip.SetTradeTargetItem then return false end
+        tip:SetTradeTargetItem(index)
+    end
+    for i = 2, tip:NumLines() do
+        local fs = _G["SoDPLGuildFoundScanTipTextLeft" .. i]
+        local t = fs and fs:GetText()
+        if t and t:find(bindTradePattern) then return true end
+    end
+    return false
+end
+
+-- Inspect the live trade window. Returns true (+ a reason key) if it holds anything
+-- that may NOT be traded outside the guild: any gold on either side, or any item
+-- (either side) that is neither on the allowlist nor an allowed conjured item. Both
+-- sides are checked because receiving gold from a non-guildmate is a transfer too.
+local function linkNotAllowed(link, ex, side, index)
+    if not link then return false end
+    local id = tonumber(link:match("item:(%d+)"))
+    if id and ex[id] then return false end                                  -- on the allowlist
+    if Addon:GuildFound("allowConjured") and isConjuredLink(link) then       -- conjured & permitted
+        return false
+    end
+    -- Still tradeable via its group-loot window & that exemption is on (slot-scanned).
+    if side and Addon:GuildFound("allowTradeWindow") and slotInTradeWindow(side, index) then
+        return false
+    end
+    return true
+end
+
+local function tradeHasBlockedContent()
+    if (GetPlayerTradeMoney() or 0) > 0 or (GetTargetTradeMoney() or 0) > 0 then
+        return true, "gold"
+    end
+    -- Enchant / lockpicking service: an item parked in either side's "will not be
+    -- traded" slot is a service performed across the guild boundary, so block it. The
+    -- allowlist governs items that *cross* the boundary; a service item never does, so
+    -- it isn't exempted by the allowlist or the conjured toggle.
+    if (GetTradePlayerItemLink and GetTradePlayerItemLink(TRADE_SERVICE_SLOT))
+       or (GetTradeTargetItemLink and GetTradeTargetItemLink(TRADE_SERVICE_SLOT)) then
+        return true, "service"
+    end
+    local ex = Addon:GetRuleset().guildFound.tradeExceptions
+    for i = 1, TRADE_ITEM_SLOTS do
+        -- Check each side independently — never build {mine, theirs}, since a nil in
+        -- the first slot would truncate an ipairs walk and skip the other side.
+        if GetTradePlayerItemLink and linkNotAllowed(GetTradePlayerItemLink(i), ex, "player", i) then return true, "item" end
+        if GetTradeTargetItemLink and linkNotAllowed(GetTradeTargetItemLink(i), ex, "target", i) then return true, "item" end
+    end
+    return false
+end
+
+-- Block bulk-mail addons (Postal "OpenAll", OpenAllMail, MailboxExplorer, ...) from
+-- pulling gold/items out of an outsider's mail. They have no private server channel —
+-- an "open all" feature drives the very same extraction globals the default UI does —
+-- so wrapping these three is what actually stops them, per-mail via mailFromOutsider.
+--
+-- Re-asserted on every MAIL_SHOW (not just once at load): if a mail addon loaded after
+-- us and *replaced* one of these globals, this re-wraps over its version so we're the
+-- outermost check at the moment the inbox is used (and its behaviour still runs, as our
+-- captured `orig`, for guildmate mail). The marker set keeps it idempotent — we only
+-- re-wrap when something has displaced us, never our own wrapper, so no chain growth on
+-- a normal open. Residual gap (best-effort, unpreventable): an addon that upvalue-cached
+-- the raw function at load and calls that local directly bypasses us — accepted under
+-- the honor-system integrity model (see PROGRESS.md).
+local TAKE_FNS  = { "TakeInboxItem", "TakeInboxMoney", "AutoLootMailItem" }
+local mailWraps = {}   -- set of wrapper fns WE installed, so re-running is a no-op on them
+local function installMailTakeGuards()
+    for _, name in ipairs(TAKE_FNS) do
+        local cur = _G[name]
+        if cur and not mailWraps[cur] then
+            local orig = cur
+            local wrapped = function(index, ...)
+                if active("mail") and mailFromOutsider(index) then
+                    Addon:Alert("You can't take anything from mail sent by someone outside your guild.", "guildfound-inbox-open")
+                    return
+                end
+                return orig(index, ...)
+            end
+            mailWraps[wrapped] = true
+            _G[name] = wrapped
+        end
+    end
+end
+
+-- ---------------------------------------------------------------------------
+function GuildFound:OnEnable()
+    -- Trade: partner name is available as unit "NPC" once the window is shown.
+    -- Re-evaluate on every content change (items/gold added) and on accept, since
+    -- the allowlist decision depends on what is in the window, not just who it's with.
+    self:RegisterEvent("TRADE_SHOW",                 "EvaluateTrade")
+    self:RegisterEvent("TRADE_ACCEPT_UPDATE",        "EvaluateTrade")
+    self:RegisterEvent("TRADE_MONEY_CHANGED",        "EvaluateTrade")
+    self:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED",  "EvaluateTrade")
+    self:RegisterEvent("TRADE_TARGET_ITEM_CHANGED",  "EvaluateTrade")
+    self:RegisterEvent("TRADE_CLOSED",               "OnTradeClosed")
+    -- A partner's item may resolve asynchronously (uncached tooltip); when its data
+    -- arrives, re-evaluate so a conjured item wrongly blocked in the meantime frees up.
+    self:RegisterEvent("GET_ITEM_INFO_RECEIVED",     "OnItemInfoReceived")
+
+    -- Auction House: flat block — close it on open.
+    for _, ev in ipairs({ "AUCTION_HOUSE_SHOW" }) do
+        pcall(self.RegisterEvent, self, ev, "OnAuctionHouseShow")
+    end
+
+    -- Inbound mail from outsiders is blocked at open/take time (see the OpenMail and
+    -- TakeInbox* hooks below); we do NOT pre-emptively warn just because such mail is
+    -- sitting in the inbox.
+
+    -- Trade completion: AcceptTrade is a plain global. Wrap it once so a trade with a
+    -- player outside your guild can't be finalised if it contains gold or any item not
+    -- on the allowlist. This is the enforcement point — we never force the window
+    -- shut, so the player can still open a trade and exchange allowlisted items (and a
+    -- solo player with no guild is governed entirely by their own allowlist). Guard
+    -- against double-wrap.
+    if not self.tradeHooked and AcceptTrade then
+        self.tradeHooked = true
+        local origAccept = AcceptTrade
+        AcceptTrade = function(...)
+            if active("trade") then
+                local partner = UnitName("NPC")
+                if partner and partner ~= "" and not isGuildmate(partner) and tradeHasBlockedContent() then
+                    Addon:Alert("This trade can't be completed outside your guild — only listed items, and never gold.", "guildfound-trade")
+                    return
+                end
+            end
+            return origAccept(...)
+        end
+    end
+
+    -- Outbound mail: SendMail is a plain global (not combat-protected), so wrap it
+    -- once to abort sends to non-guildmates before dispatch. Same wrap-the-global
+    -- pattern as Enforcement's BuyTrainerService block; guard against double-wrap.
+    if not self.mailHooked and SendMail then
+        self.mailHooked = true
+        local origSendMail = SendMail
+        SendMail = function(recipient, ...)
+            if active("mail") and not isGuildmate(recipient) then
+                Addon:Alert("You can only mail guild members while Guild Found is active.", "guildfound-mail")
+                return
+            end
+            return origSendMail(recipient, ...)
+        end
+    end
+
+    -- Inbound mail from outside the guild: prevent it being opened. Hook the
+    -- OpenMail frame's OnShow — when a mail is opened, InboxFrame.openMailID is the
+    -- inbox index; if that mail is from an outsider, hide the frame again so its body
+    -- and attachments can't be viewed. Hook-once; OpenMailFrame is standard FrameXML.
+    if not self.mailOpenHooked and OpenMailFrame then
+        self.mailOpenHooked = true
+        OpenMailFrame:HookScript("OnShow", function()
+            if not active("mail") then return end
+            local index = InboxFrame and InboxFrame.openMailID
+            if mailFromOutsider(index) then
+                HideUIPanel(OpenMailFrame)
+                Addon:Alert("You can't open mail from outside your guild while Guild Found is active.", "guildfound-inbox-open")
+            end
+        end)
+    end
+
+    -- Inbox visual marker: lay a "Blocked" overlay over any inbox row whose sender is
+    -- outside the guild, so the player can see at a glance which mail is locked (the
+    -- open/take hooks above remain the actual enforcement). Blizzard runs
+    -- InboxFrame_Update on every inbox repaint (open, page turn, new mail arrives), so
+    -- hooking it keeps the overlays correct across paging. The per-row `MailItem<i>`
+    -- frame is the full-width clickable row; its `MailItem<i>Button` child carries the
+    -- absolute inbox `.index`. Hook-once; guard the global's existence per build.
+    if not self.inboxOverlayHooked and type(InboxFrame_Update) == "function" then
+        self.inboxOverlayHooked = true
+        local overlays = {}
+        local function getOverlay(row, button)
+            if overlays[row] then return overlays[row] end
+            -- A dedicated child frame raised above the row (icon included) so the wash
+            -- and label sit over everything the row draws.
+            local f = CreateFrame("Frame", nil, row)
+            f:SetAllPoints(row)
+            f:SetFrameLevel((button:GetFrameLevel() or 0) + 5)
+            local wash = f:CreateTexture(nil, "BACKGROUND")
+            wash:SetAllPoints()
+            wash:SetColorTexture(0, 0, 0, 0.55)
+            local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            label:SetPoint("LEFT", 44, 0)
+            label:SetText("|cffff3030Blocked|r")
+            -- "Return" button: sends the outsider's mail back to its sender. Reads the
+            -- row's live inbox index at click time (it changes as the inbox pages), and
+            -- only acts while the mail rule is active and the sender is still an outsider.
+            -- ReturnInboxItem fires MAIL_INBOX_UPDATE, which repaints the overlays. Only
+            -- shown for returnable player mail (see the update loop) — AH/system mail has
+            -- no return recipient.
+            local ret = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+            ret:SetSize(64, 22)
+            ret:SetPoint("RIGHT", -8, 0)
+            ret:SetText("Return")
+            ret:SetScript("OnClick", function()
+                local index = button.index
+                if not (active("mail") and index and mailFromOutsider(index)) then return end
+                if ReturnInboxItem then ReturnInboxItem(index) end
+            end)
+            f.retButton = ret
+            f:Hide()
+            overlays[row] = f
+            return f
+        end
+        hooksecurefunc("InboxFrame_Update", function()
+            local on = active("mail")
+            for i = 1, (INBOXITEMS_TO_DISPLAY or 7) do
+                local row    = _G["MailItem" .. i]
+                local button = _G["MailItem" .. i .. "Button"]
+                if row and button then
+                    local ov = getOverlay(row, button)
+                    if on and button.index and mailFromOutsider(button.index) then
+                        -- Return only makes sense for returnable player mail; AH/system
+                        -- mail is blocked but has no sender to return to.
+                        ov.retButton:SetShown(mailReturnable(button.index))
+                        ov:Show()
+                    else
+                        ov:Hide()
+                    end
+                end
+            end
+        end)
+    end
+
+    -- Backstop: block the attachment/money take functions too, so nothing can be
+    -- extracted from an outsider's mail even if the frame is bypassed — this is also what
+    -- stops "open all mail" addons, which drive these same globals. Installed now and
+    -- re-asserted on MAIL_SHOW so we stay outermost even if a mail addon replaces a global
+    -- after us (see installMailTakeGuards).
+    installMailTakeGuards()
+    self:RegisterEvent("MAIL_SHOW", installMailTakeGuards)
+
+    -- Auction House (defense in depth): the retail C_AuctionHouse API is present in
+    -- SoD. Wrap both the post AND the buy entry points so nothing crosses the AH even
+    -- if the window somehow stays open — for a closed economy gold leaving via a
+    -- buyout/bid matters as much as posting. Missing functions are skipped (`if orig`),
+    -- so this is safe across builds. Guard against double-wrap; all are plain globals.
+    if not self.ahHooked and C_AuctionHouse then
+        self.ahHooked = true
+        for _, fn in ipairs({
+            "PostItem", "PostCommodity",                                  -- sell side
+            "PlaceBid", "StartCommoditiesPurchase", "ConfirmCommoditiesPurchase",  -- buy side
+        }) do
+            local orig = C_AuctionHouse[fn]
+            if orig then
+                C_AuctionHouse[fn] = function(...)
+                    if active("auction") then
+                        Addon:Alert("The Auction House is disabled while Guild Found is active.", "guildfound-ah")
+                        return
+                    end
+                    return orig(...)
+                end
+            end
+        end
+    end
+end
+
+-- Should the current trade be blocked from completing? True only when the trade
+-- rule is on, the partner is outside your guild (or you have no guild), and the
+-- window holds gold or a non-allowlisted item. Guildmates are never blocked.
+local function shouldBlockTrade()
+    if not active("trade") then return false end
+    local partner = UnitName("NPC")
+    if not partner or partner == "" then return false end
+    if isGuildmate(partner) then return false end
+    return tradeHasBlockedContent()
+end
+
+-- Evaluate the current trade against the policy. The window is never force-closed;
+-- instead the default UI's Trade button is disabled while the window holds anything
+-- that can't be traded outside your guild, so the trade can't be accepted until it's
+-- fixed. (The AcceptTrade wrap above is the hard backstop.) We only ever re-enable a
+-- button we disabled, so Blizzard's own accept-handshake state is left alone.
+function GuildFound:EvaluateTrade()
+    local btn = TradeFrameTradeButton
+    if shouldBlockTrade() then
+        if btn then btn:Disable() end
+        self.tradeBtnDisabled = true
+        Addon:Alert("Outside your guild you may only trade listed exception items — never gold.", "guildfound-trade-content")
+    elseif self.tradeBtnDisabled then
+        if btn then btn:Enable() end
+        self.tradeBtnDisabled = false
+    end
+end
+
+-- Trade window closed: clear our disable flag so the next trade starts clean.
+function GuildFound:OnTradeClosed()
+    self.tradeBtnDisabled = false
+end
+
+-- Item data finished loading. GET_ITEM_INFO_RECEIVED fires globally and often, so
+-- only re-evaluate while a trade window is actually open (the sole place we read
+-- item links); a freshly-cached conjured item can then re-enable the Trade button.
+function GuildFound:OnItemInfoReceived()
+    if TradeFrame and TradeFrame:IsShown() then
+        self:EvaluateTrade()
+    end
+end
+
+-- Auction House opened → sever the connection and hide the window, warn.
+--
+-- We defer the close by a frame instead of doing it inline. The AH UI
+-- (Blizzard_AuctionUI) is load-on-demand, so on the first auctioneer interaction our
+-- permanently-registered AUCTION_HOUSE_SHOW handler can run BEFORE Blizzard has loaded
+-- and ShowUIPanel'd AuctionFrame. Closing mid-show severs the server connection but
+-- leaves Blizzard to show the frame afterward: an unresponsive AH window that lingers
+-- out of range and re-surfaces whenever the UI-panel manager next lays out (opening a
+-- vendor or mailbox, or a fresh login). Running a frame later — after Blizzard has
+-- shown it — lets us CloseAuctionHouse() AND HideUIPanel() it cleanly so the panel
+-- manager stays in sync (a bare :Hide() would not). Handle both the Classic AuctionFrame
+-- and the retail-style AuctionHouseFrame, whichever a given build presents.
+function GuildFound:OnAuctionHouseShow()
+    if not active("auction") then return end
+    local function shut()
+        if not active("auction") then return end
+        if CloseAuctionHouse then CloseAuctionHouse() end
+        if AuctionFrame and AuctionFrame:IsShown() then HideUIPanel(AuctionFrame) end
+        if AuctionHouseFrame and AuctionHouseFrame:IsShown() then HideUIPanel(AuctionHouseFrame) end
+    end
+    if C_Timer and C_Timer.After then C_Timer.After(0, shut) else shut() end
+    Addon:Alert("The Auction House is disabled while Guild Found is active.", "guildfound-ah")
+end

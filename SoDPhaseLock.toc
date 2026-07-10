@@ -2,7 +2,7 @@
 ## Title: SoD Phase Lock
 ## Notes: Coordinate and lock a guild to a chosen Season of Discovery phase (authentic or relaxed).
 ## Author: Joros
-## Version: 0.6.6
+## Version: 0.7.0
 ## SavedVariables: SoDPhaseLockDB
 ## IconTexture: Interface\Icons\inv_misc_pocketwatch_01
 ## X-Category: Guild
@@ -16,6 +16,7 @@ Data\Phases.lua
 Data\Quests.lua
 Data\RaidDrops.lua
 Data\OtherworldlyTreasures.lua
+Data\Incursions.lua
 Data\Enchants.lua
 Data\EnchantReagents.lua
 Data\EnchantApplyPhases.lua
@@ -30,9 +31,12 @@ Modules\Comm.lua
 Modules\Compliance.lua
 Modules\GroupInspect.lua
 Modules\GuildPopulation.lua
+Modules\GuildFound.lua
+Modules\Playtime.lua
 
 # UI
 UI\Options.lua
 UI\Roster.lua
+UI\TradeExceptions.lua
 UI\Welcome.lua
 UI\BagOverlay.lua

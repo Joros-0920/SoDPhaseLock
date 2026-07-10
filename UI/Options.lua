@@ -18,6 +18,8 @@ local function notGuildLeader()  return not Addon:IsGuildLeader() end
 -- Commit a guild-config edit (caller already mutated db.global.ruleset).
 -- Pass msg to print a targeted confirmation instead of the generic ruleset line.
 local function commitGuild(msg)
+    -- Confirmation is printed to THIS officer only; members are not notified in chat
+    -- when the ruleset is broadcast to them. Silent apply when we've already printed msg.
     if msg then Addon:Print(msg) end
     Addon:CommitGuildSettings(msg ~= nil)
 end
@@ -1337,11 +1339,18 @@ local options = {
                     name = function()
                         local r = Addon:GetRuleset()
                         local d = Addon:GetPhaseData()
-                        return string.format("|cffffd100Active:|r %s  |  mode |cff00ff00%s|r  |  level cap %d\n|cffffd100Set by:|r %s    |cffffd100You are:|r %s",
+                        -- Summarise which Guild Found restrictions are active.
+                        local gf, parts = r.guildFound, {}
+                        if gf.trade   then parts[#parts + 1] = "Trade" end
+                        if gf.mail    then parts[#parts + 1] = "Mail" end
+                        if gf.auction then parts[#parts + 1] = "AH" end
+                        local gfText = (#parts > 0) and ("|cff00ff00" .. table.concat(parts, ", ") .. "|r") or "|cffff8080off|r"
+                        return string.format("|cffffd100Active:|r %s  |  mode |cff00ff00%s|r  |  level cap %d\n|cffffd100Set by:|r %s    |cffffd100You are:|r %s    |cffffd100Guild Found:|r %s",
                             d and d.name or "?", Addon:GetMode(), d and d.levelCap or 0,
                             r.setBy ~= "" and r.setBy or "—",
                             Addon:IsGuildLeader() and "the guild leader"
-                                or (Addon:IsOfficer() and "an officer" or "a member (follows guild config)"))
+                                or (Addon:IsOfficer() and "an officer" or "a member (follows guild config)"),
+                            gfText)
                     end,
                 },
                 nextPhaseDate = {
@@ -1492,26 +1501,41 @@ local options = {
                         sp2 = { type = "description", order = 4, name = " ", width = "full" },
                         officerRank = {
                             type = "range", order = 5, name = "Officer rank threshold",
-                            desc = "Guild rank index (0 = Guild Master) at or below which a member may set the phase/mode.",
+                            desc = "Guild rank index (0 = Guild Master) at or below which a member may set the phase/mode. Synced to the whole guild. You cannot set it below your own rank (that would lock you out).",
                             width = "full",
                             min = 0, max = 9, step = 1, disabled = notOfficer,
-                            get = function() return Addon.db.global.officerRankIndex end,
-                            set = function(_, v) Addon.db.global.officerRankIndex = v end,
+                            get = function() return Addon:GetRuleset().officerRankIndex or 1 end,
+                            set = function(_, v)
+                                -- A lower rank index = higher authority. Never let an
+                                -- officer set the threshold below their OWN rank, which
+                                -- would immediately strip their officer status and lock
+                                -- them out of these very controls. The GM (rank 0) and a
+                                -- guildless/solo player have no floor.
+                                local myRank = Addon:GetGuildRankIndex(UnitName("player"))
+                                if myRank and v < myRank then
+                                    v = myRank
+                                    Addon:Print("|cffffd100Officer rank threshold clamped to " .. v ..
+                                        "|r — a lower value would exclude your own rank and lock you out.")
+                                end
+                                Addon:GetRuleset().officerRankIndex = v
+                                commitGuild("Officer rank threshold: " .. v)
+                            end,
                         },
                     },
                 },
                 rules = {
                     type = "group", inline = true, order = 20,
-                    name = "Enforcement config (guild leader)",
+                    name = "Enforcement Config",
                     args = {},   -- per-rule toggles built below
                 },
                 behavior = {
                     type = "group", inline = true, order = 30,
-                    name = "Enforcement behavior (guild leader)",
+                    name = "Enforcement Behavior",
                     args = {
                         autoUnequip = {
                             type = "toggle", order = 1, name = "Block over-phase gear",
                             desc = "Authentic mode: prevent equipping items from later phases — declines bind-on-equip prompts and unequips them out of combat. When off, over-phase gear is only flagged (warning + compliance log).",
+                            width = "relative", relWidth = 0.5,
                             disabled = notGuildLeader,
                             get = function() return Addon:AutoUnequip() end,
                             set = function(_, v)
@@ -1522,11 +1546,121 @@ local options = {
                         instanceGrace = {
                             type = "range", order = 2, name = "Instance grace period (seconds)",
                             desc = "How long a member may stay in a not-yet-unlocked instance before being reported to the compliance log.",
+                            width = "relative", relWidth = 0.5,
                             min = 0, max = 600, step = 5, disabled = notGuildLeader,
                             get = function() return Addon:InstanceGrace() end,
                             set = function(_, v)
                                 Addon:GetRuleset().instanceGrace = v
                                 commitGuild("Instance grace period: " .. v .. "s")
+                            end,
+                        },
+                        playedGapCheck = {
+                            type = "toggle", order = 3, name = "Flag playing without the addon",
+                            desc = "Detect members who play with the addon disabled. The addon compares server \"total time played\" against the time it was actually loaded; time played while the addon was off is reported and flags the member out of compliance once it exceeds the tolerance below. Durable and retroactive — unlike \"Addon Not Detected\", no officer has to be watching live. Best-effort: a modified addon can still forge it.",
+                            width = "relative", relWidth = 0.5,
+                            disabled = notGuildLeader,
+                            get = function() return Addon:GetRuleset().playedGapCheck end,
+                            set = function(_, v)
+                                Addon:GetRuleset().playedGapCheck = v
+                                commitGuild("Flag playing without the addon: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
+                            end,
+                        },
+                        playedGapGrace = {
+                            type = "range", order = 4, name = "Played-without-addon tolerance (minutes)",
+                            desc = "How much unobserved play time (server /played that grew while the addon was NOT loaded) is tolerated before a member is flagged. Keep some slack for a patch that disables addons or the occasional login without the addon.",
+                            width = "relative", relWidth = 0.5,
+                            min = 0, max = 10, step = 1, disabled = notGuildLeader,
+                            get = function() return Addon:GetRuleset().playedGapGrace or 5 end,
+                            set = function(_, v)
+                                Addon:GetRuleset().playedGapGrace = v
+                                commitGuild("Played-without-addon tolerance: " .. v .. " min")
+                            end,
+                        },
+                    },
+                },
+                guildFound = {
+                    type = "group", inline = true, order = 40,
+                    name = "Guild Found - Closed Economy",
+                    args = {
+                        intro = {
+                            type = "description", order = 0, fontSize = "medium",
+                            name = "Restrict members to their own guild's economy. Each restriction is independent.",
+                        },
+                        -- All trade controls (the master toggle, the item allowlist, and
+                        -- the blanket exemptions) share one container so the cluster reads
+                        -- as a unit, distinct from the single-toggle Mail/Auction rules.
+                        trade = {
+                            type = "group", inline = true, order = 1, name = "Trade",
+                            args = {
+                                toggle = {
+                                    type = "toggle", order = 1, name = "Trade Between Guild Members",
+                                    desc = "Trades between guild members are unrestricted. Trades with anyone outside the guild (or any trade if you're not in a guild) are limited to the items on the Exceptions list and never gold. Enchanting and lockpicking services (an item in the \"will not be traded\" slot) are also blocked outside the guild. The Trade button is disabled until any invalid item, gold, or service item is removed.",
+                                    width = 2,
+                                    disabled = notGuildLeader,
+                                    get = function() return Addon:GuildFound("trade") end,
+                                    set = function(_, v)
+                                        Addon:GetRuleset().guildFound.trade = v
+                                        commitGuild("Guild Found: Trade: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
+                                    end,
+                                },
+                                exceptions = {
+                                    type = "execute", order = 2, width = 1,
+                                    name = function()
+                                        local n = 0
+                                        for _ in pairs(Addon:GetRuleset().guildFound.tradeExceptions) do n = n + 1 end
+                                        return "Exceptions" .. (n > 0 and (" (" .. n .. ")") or "")
+                                    end,
+                                    desc = "Items that may be traded with non-guild members. If any are listed, cross-guild trades are allowed as long as they contain only these items and no gold.",
+                                    func = function() if ns.ToggleTradeExceptions then ns.ToggleTradeExceptions() end end,
+                                },
+                                exemptHeader = {
+                                    type = "description", order = 3, fontSize = "medium",
+                                    name = "Always allowed (in addition to the Exceptions list):",
+                                },
+                                allowConjured = {
+                                    type = "toggle", order = 4, width = "full",
+                                    name = "Allow conjured items",
+                                    desc = "Exempt conjured items (mage food/water, healthstones, soulstones, etc.) from the Trade restriction, so they can be traded with anyone.",
+                                    disabled = function() return notGuildLeader() or not Addon:GuildFound("trade") end,
+                                    get = function() return Addon:GuildFound("allowConjured") end,
+                                    set = function(_, v)
+                                        Addon:GetRuleset().guildFound.allowConjured = v
+                                        commitGuild("Guild Found — allow conjured items: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
+                                    end,
+                                },
+                                allowTradeWindow = {
+                                    type = "toggle", order = 5, width = "full",
+                                    name = "Allow items still in their trade window",
+                                    desc = "Exempt recently group-looted bind-on-pickup drops that are still tradeable to players who were also eligible to loot them (their trade timer is still running) from the Trade restriction.",
+                                    disabled = function() return notGuildLeader() or not Addon:GuildFound("trade") end,
+                                    get = function() return Addon:GuildFound("allowTradeWindow") end,
+                                    set = function(_, v)
+                                        Addon:GetRuleset().guildFound.allowTradeWindow = v
+                                        commitGuild("Guild Found — allow trade-window items: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
+                                    end,
+                                },
+                            },
+                        },
+                        mail = {
+                            type = "toggle", order = 2, name = "Mail Between Guild Members",
+                            desc = "Block sending mail to non-guild members, and lock mail received from them so it can't be opened or looted. System/auction mail is unaffected.",
+                            width = "full",
+                            disabled = notGuildLeader,
+                            get = function() return Addon:GuildFound("mail") end,
+                            set = function(_, v)
+                                Addon:GetRuleset().guildFound.mail = v
+                                commitGuild("Guild Found: Mail: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
+                            end,
+                        },
+                        auction = {
+                            type = "toggle", order = 3, name = "Block the Auction House",
+                            desc = "Close the Auction House on open and block posting.",
+                            width = "full",
+                            disabled = notGuildLeader,
+                            get = function() return Addon:GuildFound("auction") end,
+                            set = function(_, v)
+                                Addon:GetRuleset().guildFound.auction = v
+                                commitGuild("Guild Found: Auction House: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
                             end,
                         },
                     },

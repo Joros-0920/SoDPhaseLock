@@ -35,7 +35,8 @@ local function compareVersions(a, b)
     return 0
 end
 
--- Message types: "R" ruleset, "REQ" request current ruleset, "S" status
+-- Message types: "R" ruleset, "REQ" request current ruleset, "S" status,
+--                "GFC" officer-cleared a persisted Guild Found tamper flag
 --
 -- Traffic budget: WoW's server drops guild addon messages above a low aggregate
 -- rate, so everything below is designed to keep guild-wide chatter bounded even
@@ -45,6 +46,7 @@ local STATUS_MAX     = 300    -- ceiling interval for very large guilds
 local TARGET_CPS     = 4      -- target guild-wide status msgs/sec (interval = online / this)
 local REQ_SPREAD     = 6      -- window (s) a queued REQ reply is jittered across
 local REQ_SUPPRESS   = 8      -- don't re-answer a REQ within this long of the last ruleset seen/sent
+local PWA_SUPPRESS   = 8      -- don't re-answer a played-witness query if one was seen this recently
 
 -- ---------------------------------------------------------------------------
 local function pack(tbl)
@@ -140,6 +142,10 @@ end
 -- reports arrive spread out rather than in 60s-boundary bursts.
 function Comm:StatusTick()
     self:SendStatus()
+    -- Piggyback the attestation scan on the same periodic beat: notice members who
+    -- have been online a sustained time with no ping and save an "addon not
+    -- detected" record for them (see Compliance:ScanAttestation).
+    if ns.Compliance and ns.Compliance.ScanAttestation then ns.Compliance:ScanAttestation() end
     self:ScheduleStatus()
 end
 
@@ -162,6 +168,10 @@ function Comm:OnEnable()
     -- On login: ask the guild for the current ruleset (jittered to avoid a
     -- mass-login REQ burst), then start status pings.
     self:ScheduleTimer("RequestSync", 2 + math.random() * 6)
+    -- Ask the guild for our own witnessed-/played high-water so an alternate PC adopts
+    -- it before Playtime attributes any login gap (see Modules/Playtime.lua). Jittered
+    -- like REQ, and well inside Playtime's reconciliation window.
+    self:ScheduleTimer("RequestPlayedWitness", 2 + math.random() * 6)
     -- Retry once if nobody answered the first REQ (e.g. guild leader offline,
     -- other members still loading). Only fires when epoch is still 0, so it is
     -- free for anyone who already synced.
@@ -189,6 +199,10 @@ local function rulesetPayload()
         auto    = r.autoUnequip,
         grace   = r.instanceGrace,
         npd     = r.nextPhaseDate,
+        gf      = r.guildFound,
+        pgc     = r.playedGapCheck,   -- played-without-addon check on/off (guild leader)
+        pgg     = r.playedGapGrace,   -- tolerated unobserved-play minutes before flagging
+        orank   = r.officerRankIndex, -- guild-rank threshold for officer authority (0 = GM)
         v       = VERSION,
     }
 end
@@ -198,6 +212,15 @@ function Comm:BroadcastRuleset()
     -- any REQ replies for a beat (REQ_SUPPRESS) instead of piling on.
     self.lastRulesetSeen = GetTime()
     send(rulesetPayload())
+end
+
+-- Number of item IDs on our local trade allowlist. Members synced to the same
+-- epoch must have an identical allowlist, so a differing count at equal epoch means
+-- the SavedVariables were edited to widen what's tradeable (see integrity model).
+local function gfExceptionCount()
+    local n = 0
+    for _ in pairs(Addon:GetRuleset().guildFound.tradeExceptions) do n = n + 1 end
+    return n
 end
 
 function Comm:SendStatus()
@@ -217,8 +240,43 @@ function Comm:SendStatus()
         vQ    = v.quest or 0,
         vR    = v.rune and 1 or 0,
         vX    = IsXPUserDisabled() and 1 or 0,   -- XP gains disabled at NPC (informational, not a violation)
+        -- Local Guild Found state, for tamper detection vs the authoritative ruleset.
+        gf    = {
+            trade   = Addon:GuildFound("trade"),
+            mail    = Addon:GuildFound("mail"),
+            auction = Addon:GuildFound("auction"),
+        },
+        gfxn  = gfExceptionCount(),              -- size of local trade allowlist (tamper check vs authoritative at same epoch)
+        en    = Addon.db.profile.enabled and 1 or 0,  -- local master switch; 0 ⇒ NOTHING is enforced (Guild Found included)
+        up    = (ns.Playtime and ns.Playtime:GetUnobserved()) or 0,  -- cumulative /played seconds accrued with the addon NOT loaded
+        ob    = ns.Playtime and ns.Playtime:GetObserved() or nil,    -- witnessed-/played high-water, so peers can reconcile our alternate PCs
         v     = VERSION,                         -- addon version, for out-of-date detection
     })
+end
+
+-- An officer cleared a member's saved integrity flag(s) (Guild Found tamper and/or
+-- "addon not detected"). Broadcast it guild-wide so the clear lands on every
+-- officer's client, not just the one who issued it. Carries the clearing officer's
+-- name (`by`) for authority validation on receipt — same trust model as "R".
+function Comm:BroadcastGFClear(player)
+    if not player or player == "" then return end
+    send({ t = "GFC", player = player, by = UnitName("player"), v = VERSION })
+end
+
+-- An officer forgave a member's played-without-addon gap. Broadcast guild-wide so it
+-- reaches the flagged MEMBER (who resets their local counter) as well as every officer.
+-- Carries the officer's name (`by`) for authority validation on receipt, like "GFC".
+function Comm:BroadcastPlayedForgive(player)
+    if not player or player == "" then return end
+    send({ t = "PGF", player = player, by = UnitName("player"), v = VERSION })
+end
+
+-- Ask the guild what /played high-water it has witnessed for US, so an alternate PC
+-- (whose local record only knows its own sessions) adopts the shared value and doesn't
+-- mistake honest multi-PC play for playing without the addon. Peers answer with "PWA".
+function Comm:RequestPlayedWitness()
+    if not IsInGuild() then return end
+    send({ t = "PWQ", who = UnitName("player"), v = VERSION })
 end
 
 -- ---------------------------------------------------------------------------
@@ -266,8 +324,11 @@ function Comm:OnComm(prefix, message, distribution, sender)
             self:CancelTimer(self.reqAnswerTimer)
             self.reqAnswerTimer = nil
         end
+        -- Apply silently: members are not notified in chat when a ruleset is broadcast
+        -- to them. The officer who made the change still sees their own local confirmation
+        -- (printed on their client by ApplyRuleset / commitGuild).
         Addon:ApplyRuleset(data.phase, data.mode, data.epoch, data.by,
-            data.enforce, data.auto, data.grace, data.npd)
+            data.enforce, data.auto, data.grace, data.npd, data.gf, data.pgc, data.pgg, data.orank, true)
 
     elseif data.t == "REQ" then
         -- Answer with our cached ruleset so newcomers sync. The receiver still
@@ -287,6 +348,69 @@ function Comm:OnComm(prefix, message, distribution, sender)
             self.reqAnswerTimer = nil
             self:BroadcastRuleset()
         end, math.random() * REQ_SPREAD)
+
+    elseif data.t == "GFC" then
+        -- Officer cleared a member's saved integrity flag(s). Authority is tied to
+        -- the clearer (data.by), not the relayer — reject unless that origin is an
+        -- officer (mirrors the "R" branch; a non-officer relaying is harmless).
+        if not Addon:IsOfficer(data.by) then return end
+        if data.player and ns.Compliance then
+            ns.Compliance:ApplyClear(data.player)
+        end
+
+    elseif data.t == "PGF" then
+        -- Officer forgave a member's played-without-addon gap. Authority is tied to the
+        -- clearer (data.by), like "GFC". Only the named member acts on it — they reset
+        -- their local counter and re-baseline, then push a fresh ping so the row clears.
+        if not Addon:IsOfficer(data.by) then return end
+        if data.player and ns.Playtime
+           and Ambiguate(data.player, "short") == me then
+            ns.Playtime:Rebaseline()
+        end
+
+    elseif data.t == "PWQ" then
+        -- A guildmate is asking for the highest /played our records have witnessed for
+        -- them, so a fresh/alternate PC of theirs can adopt it instead of false-flagging
+        -- honest multi-PC play. Reconciliation can only ever RAISE their baseline (never
+        -- accuse), so relaying is safe. Answer with a single jittered, gossip-suppressed
+        -- reply keyed per player (mirrors the REQ gossip pattern) so a mass login doesn't
+        -- draw O(N) replies each.
+        if sender == me then return end
+        local who = data.who
+        if not who or not ns.Compliance then return end
+        local stored = ns.Compliance:GetWitness(who)
+        if not stored or stored <= 0 then return end             -- nothing to share
+        local key = Ambiguate(who, "short"):lower()
+        self._pwaTimers = self._pwaTimers or {}
+        self._pwaSeen   = self._pwaSeen or {}
+        if self._pwaTimers[key] then return end                  -- already planning to answer
+        if self._pwaSeen[key] and (GetTime() - self._pwaSeen[key]) < PWA_SUPPRESS then
+            return                                               -- someone just answered
+        end
+        self._pwaTimers[key] = self:ScheduleTimer(function()
+            self._pwaTimers[key] = nil
+            local cur = ns.Compliance:GetWitness(who)            -- re-read; may have grown
+            if cur and cur > 0 then
+                send({ t = "PWA", who = who, ob = math.floor(cur), v = VERSION })
+            end
+        end, math.random() * REQ_SPREAD)
+
+    elseif data.t == "PWA" then
+        -- Answer to a played-witness query. Note the sighting so other peers suppress
+        -- their duplicate replies; if it's for US, adopt it (capped at our real /played
+        -- inside Playtime, so a forged value can't baseline us beyond what we've played).
+        local who = data.who
+        if not who then return end
+        local key = Ambiguate(who, "short"):lower()
+        self._pwaSeen = self._pwaSeen or {}
+        self._pwaSeen[key] = GetTime()
+        if self._pwaTimers and self._pwaTimers[key] then
+            self:CancelTimer(self._pwaTimers[key])
+            self._pwaTimers[key] = nil
+        end
+        if ns.Playtime and Ambiguate(who, "short") == me then
+            ns.Playtime:AdoptWitness(data.ob)
+        end
 
     elseif data.t == "S" then
         -- Someone reports a newer ruleset than we hold: we're a straggler that

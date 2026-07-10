@@ -4,6 +4,57 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.0] - 2026-07-09
+
+### Added
+- **Catch members who play with the addon turned off.** A new guild-leader check (Guild Settings → Enforcement Behavior → **"Flag playing without the addon"**) compares your character's server *total time played* against the time the addon was actually loaded. Any time you play with the addon disabled or uninstalled shows up as a gap, and once it passes the tolerance you set (0–10 minutes, in 1-minute steps; default **5 minutes**), you're flagged **out of compliance** ("played 2.4h without addon"). Unlike "Addon Not Detected", this is **retroactive and durable** — the gap is baked into your `/played`, so it's caught the next time you log in with the addon even if no officer was watching at the time. This closes the common "turn the addon off for the raid, turn it back on after" loophole.
+- **Playing the same character on multiple PCs is handled.** Each computer keeps its own record, so on its own an alternate PC would mistake the hours you played on your *other* PC for time without the addon. To prevent that, your addon shares the highest playtime it has witnessed with the guild, and when you log in on another PC it asks the guild for that value and adopts it — so honest multi-PC play isn't flagged, while genuinely playing with the addon off (on *any* PC) still is. If no guildmate who has seen your other PC is online to answer, the alternate PC may flag you until it catches up; an officer can forgive it.
+- **Officers can forgive a played-without-addon gap.** The roster's **"Clear"** button (and `/sodlock clearflag`) now also forgives this gap: it tells the member's client to reset its counter, so the flag genuinely clears guild-wide and only returns if they rack up *new* time with the addon off.
+- **Guild Found: blocked mail is now marked right in your inbox.** When the mail restriction is on, any mail you can't open is covered with a **"Blocked"** overlay in the inbox list, so you can see at a glance which letters are locked. Blocked **player** mail also gets a **"Return"** button to send it straight back to the sender.
+
+### Changed
+- **Guild config changes now announce exactly what changed.** When an officer toggles a rule (Guild Found trade/mail/AH, enforcement options, trade exceptions, etc.), the whole guild now sees the specific change — e.g. "Guild Found: Trade: enabled (set by <officer>)" — instead of the generic "Ruleset is now … mode, Phase N" line. Actual phase/mode changes still show the phase line as before.
+- **Guild Found: you can now allow trading items still in their trade window.** A new checkbox under the **Trade Between Guild Members** toggle ("Allow items still in their trade window") lets recently group-looted bind-on-pickup drops — the ones you can still hand to players who were eligible to loot them — be traded outside the guild, without having to list each item. Off by default. (The "Allow conjured items" exemption now sits alongside it there too, moved out of the Exceptions window.)
+- **Guild Found: only actual player mail is restricted now.** Ordinary NPC and system mail — quest rewards, vendor buyback, in-game support — is no longer blocked. **Auction House mail is still always blocked** while the mail restriction is on (sale proceeds, won auctions, outbid/expired refunds), so there's no way to pull gold or items back in through the AH.
+- **Guild Found: removed the pop-up nag when opening the mailbox.** It used to warn every time you opened your mail if any outsider letter was sitting there; now you're only warned when you actually try to open or take from blocked mail (and the inbox "Blocked" overlay shows which).
+- **Options: the Enforcement Behavior settings stay in a tidy two-column layout** regardless of how wide you make the options window.
+
+### Notes
+- Only playtime *after* you install the addon is ever counted — your prior `/played` is never held against you.
+- Best-effort, like every integrity signal: a modified addon can still forge it, and a client that disables addons after a patch can accrue an innocent gap (the tolerance and the officer forgive are the mitigations).
+
+---
+
+## [0.6.9] - 2026-07-09
+
+### Fixed
+- **Turning the addon off no longer hides a Guild Found opt-out.** A member who simply unchecked **Enable** stopped enforcing every Guild Found restriction while still reporting as compliant, because the tamper check compared the *guild's* settings against themselves rather than against whether the member was actually enforcing anything. Members now report their master on/off switch, so anyone who disables the addon while the guild has any Guild Found restriction active is flagged **"Guild Found disabled locally"** — saved and officer-cleared like the other integrity flags.
+- **The Auction House block now also covers buying.** The extra safety net (beyond closing the window) previously only stopped *posting* auctions; it now also blocks placing bids and buying commodities, so gold can't leave via a buyout either.
+- **Trading conjured items with the "Allow Conjured Items" exception no longer gets wrongly blocked.** When a trade partner's item hadn't finished loading on your client, it could be treated as non-conjured and block the trade; the addon now loads the missing data and re-checks automatically, freeing the Trade button once it resolves.
+
+### Changed
+- **Enchanting and lockpicking services now respect the Trade restriction.** With "Trade Between Guild Members" on, casting an enchant or picking a lockbox for someone outside your guild (an item placed in the trade window's "will not be traded" slot) is now blocked just like a normal cross-guild trade.
+
+---
+
+## [0.6.8] - 2026-07-07
+
+### Changed
+- **"Addon Not Detected" is now saved, so members without the addon leave a record.** Previously the officer-only "Addon Not Detected" list was computed live and only ever showed members who were **online right then** — so someone who never installs the addon (or fully disables it) simply vanished from the roster the moment they logged off, and an officer who wasn't watching never saw them. Now, once a member has been **online for a sustained period with no status report at all**, that fact is **saved** and keeps showing (marked "saved") even after they log off — until an **officer clears it**, exactly like the Guild Found flag. If they later install the addon and start reporting, the record clears itself automatically. Officers clear a saved record with the same **"Clear"** button or **`/sodlock clearflag <player>`** (which now clears any saved flag on a member).
+
+### Notes
+- This is best-effort, like all of the addon's integrity signals: it flags "not provably running the addon," which can't be told apart from "still loading" for a short while (hence the sustained-silence delay) and can be defeated by a modified addon that fakes reports.
+
+---
+
+## [0.6.7] - 2026-07-07
+
+### Changed
+- **A "Guild Found disabled locally" flag now sticks until an officer clears it.** Previously this warning was recalculated from each member's status update, so anyone caught disabling a Guild Found restriction could make it disappear simply by turning the restriction back on (or relogging) before an officer looked. Now the first time a member is caught, the flag is **saved** and they keep showing as out of compliance — even once their addon reports clean again — until an **officer** clears it. The clear is **synced to the whole guild**, so it lifts for every officer at once, and a member cannot clear their own flag. If they start tampering again after being cleared, they are simply re-flagged.
+- Officers clear a saved flag either from the **Compliance window** (a new "Clear" button on the flagged member's row) or with **`/sodlock clearflag <player>`**.
+
+---
+
 ## [0.6.6] - 2026-07-06
 
 ### Fixed

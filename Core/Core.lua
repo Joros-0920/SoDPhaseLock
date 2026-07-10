@@ -43,15 +43,68 @@ local defaults = {
                 autoUnequip   = false,   -- auto-remove over-phase gear out of combat
                 instanceGrace = 90,      -- seconds in a locked instance before reporting
                 nextPhaseDate = "",      -- officer-set free-text unlock date, broadcast to all members
+                -- Guild ranks 0..this may set/broadcast the ruleset (0 = GM). Synced
+                -- with the ruleset so every client agrees on who counts as an officer
+                -- (the receiver-side authority check reads this value). Editable by any
+                -- officer, but an officer can never lower it below their OWN rank index
+                -- (which would lock themselves out) — enforced in the options set handler.
+                officerRankIndex = 1,
+                -- Played-without-addon check (guild leader). When on, a member whose
+                -- server /played grew by more than `playedGapGrace` minutes while the
+                -- addon was NOT loaded is flagged out of compliance. Off by default
+                -- (nothing enforced until a guild leader turns it on). See Modules/Playtime.lua.
+                playedGapCheck = false,
+                playedGapGrace = 5,      -- minutes of unobserved /played tolerated before flagging
+                -- Guild Found: a closed-economy policy (guild leader). Each restriction
+                -- is independent so a guild can, e.g., lock trades but still allow the AH.
+                guildFound = {
+                    trade   = false,   -- may only trade fellow guild members
+                    mail    = false,   -- may only mail fellow guild members
+                    auction = false,   -- may not use the Auction House
+                    allowConjured = false,  -- exempt conjured items (mage food, healthstones…) from the trade rule
+                    allowTradeWindow = false,  -- exempt items still in their group-loot trade window (BIND_TRADE_TIME_REMAINING) from the trade rule
+                    -- Trade allowlist: item IDs that MAY be traded cross-guild even
+                    -- when `trade` is on. If non-empty, a cross-guild trade is allowed
+                    -- as long as it contains only these items and no gold. Keyed by
+                    -- itemID → true. Guild-leader controlled, synced with the ruleset.
+                    tradeExceptions = {},
+                },
             },
         },
-        officerRankIndex = 1,    -- guild ranks 0..this may set/broadcast the ruleset (0 = GM)
+        -- (officerRankIndex moved into each per-guild ruleset bucket so it syncs; see
+        --  the migration in OnInitialize for the legacy global value.)
+        -- Persisted integrity flags, bucketed per guild context (same keying as
+        -- rulesets; "" = no guild). Two kinds, both saved so they survive a member
+        -- toggling their addon / relogging, and cleared only by an officer (synced
+        -- guild-wide): `gf` = "Guild Found disabled locally" (SavedVars tamper), and
+        -- `noaddon` = "addon not detected" (sustained online with no status ping).
+        -- [guildKey][lc-short-name] = { name=<ProperShort>, gf=<time()>, noaddon=<time()> }.
+        -- See Modules/Compliance.lua.
+        gfFlags = {
+            ["*"] = {},
+        },
+        -- Guild-shared high-water mark of the /played each member's addon has WITNESSED
+        -- (the highest `observed` we've heard on their status ping), bucketed per guild.
+        -- A member on a fresh/alternate PC queries the guild for their own value and
+        -- adopts it, so honest multi-PC play isn't mistaken for playing without the addon.
+        -- [guildKey][lc-short-name] = <seconds>. See Modules/Playtime.lua reconciliation.
+        playedWitness = {
+            ["*"] = {},
+        },
     },
     char = {
         -- Strictly per-character, never shared across profiles: whether this
         -- character has seen the first-run welcome. Lives in `char` (not `profile`)
         -- so assigning a shared profile can't suppress the welcome on a new alt.
         seenWelcome = false,
+        -- Playtime-gap tracking (per realm-character, exactly like server /played).
+        -- `observed` = server /played (seconds) as of the last moment the addon was
+        -- confirmed loaded and observing (nil until the first TIME_PLAYED_MSG ever).
+        -- `unobserved` = cumulative /played growth while the addon was NOT loaded —
+        -- the dishonesty metric reported in the status ping. See Modules/Playtime.lua.
+        playtime = {
+            unobserved = 0,
+        },
     },
     profile = {
         -- Personal preferences (never synced).
@@ -106,6 +159,23 @@ function Addon:OnInitialize()
             end
             g.ruleset = nil
         end
+    end
+
+    -- Migrate the legacy global officer-rank threshold (it used to live in
+    -- db.global, unsynced) into the per-guild ruleset buckets, which are now the
+    -- synced source of truth. Only seed buckets still at the default so we never
+    -- clobber a value an officer has already broadcast at a higher epoch.
+    do
+        local g = self.db.global
+        local legacyRank = rawget(g, "officerRankIndex")
+        if type(legacyRank) == "number" and legacyRank ~= 1 then
+            for _, b in pairs(g.rulesets) do
+                if b.officerRankIndex == 1 then
+                    b.officerRankIndex = legacyRank
+                end
+            end
+        end
+        g.officerRankIndex = nil
     end
 
     -- Options + minimap launcher are registered by UI/Options.lua
@@ -199,6 +269,21 @@ end
 function Addon:AutoUnequip()       return self:GetRuleset().autoUnequip end
 function Addon:InstanceGrace()     return self:GetRuleset().instanceGrace or 90 end
 function Addon:GetNextPhaseDate()  return self:GetRuleset().nextPhaseDate or "" end
+-- Played-without-addon threshold in SECONDS (0 = the check is off). Reads the
+-- synced ruleset so every client evaluates a member's reported gap against the
+-- same guild-leader-set tolerance.
+function Addon:PlayedGapThreshold()
+    local r = self:GetRuleset()
+    if not r.playedGapCheck then return 0 end
+    local m = r.playedGapGrace or 5
+    return (m > 0) and (m * 60) or 0
+end
+-- Guild Found: each restriction (trade/mail/auction) is an independent toggle.
+function Addon:GuildFound(key)     return self:GetRuleset().guildFound[key] and true or false end
+function Addon:GuildFoundAny()
+    local gf = self:GetRuleset().guildFound
+    return (gf.trade or gf.mail or gf.auction) and true or false
+end
 
 -- Apply a ruleset (from local officer action or an incoming broadcast).
 -- `enforce`, `autoUnequip` and `instanceGrace` are the guild-controlled
@@ -206,7 +291,7 @@ function Addon:GetNextPhaseDate()  return self:GetRuleset().nextPhaseDate or "" 
 -- edits they are mutated in the active ruleset bucket directly before committing,
 -- so omitting them here leaves the freshly-edited values untouched.
 -- Returns true if it was newer than what we had and was applied.
-function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, instanceGrace, nextPhaseDate, silent)
+function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, instanceGrace, nextPhaseDate, guildFound, playedGapCheck, playedGapGrace, officerRankIndex, silent)
     local r = self:GetRuleset()
     if epoch and epoch <= r.epoch then
         return false
@@ -224,6 +309,24 @@ function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, ins
     if autoUnequip ~= nil then r.autoUnequip = autoUnequip and true or false end
     if instanceGrace ~= nil then r.instanceGrace = instanceGrace end
     if nextPhaseDate ~= nil then r.nextPhaseDate = nextPhaseDate end
+    if playedGapCheck ~= nil then r.playedGapCheck = playedGapCheck and true or false end
+    if playedGapGrace ~= nil then r.playedGapGrace = playedGapGrace end
+    if officerRankIndex ~= nil then r.officerRankIndex = officerRankIndex end
+    if guildFound then
+        r.guildFound.trade   = guildFound.trade   and true or false
+        r.guildFound.mail    = guildFound.mail    and true or false
+        r.guildFound.auction = guildFound.auction and true or false
+        r.guildFound.allowConjured = guildFound.allowConjured and true or false
+        r.guildFound.allowTradeWindow = guildFound.allowTradeWindow and true or false
+        -- Trade allowlist: replace wholesale (a list of item IDs, not a boolean).
+        if type(guildFound.tradeExceptions) == "table" then
+            local ex = r.guildFound.tradeExceptions
+            for id in pairs(ex) do ex[id] = nil end
+            for id in pairs(guildFound.tradeExceptions) do
+                ex[tonumber(id) or id] = true
+            end
+        end
+    end
 
     if not silent then
         local data = ns.Phases[r.phase]
@@ -236,13 +339,16 @@ function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, ins
     if enforcement then enforcement:FullScan() end
     if ns.RefreshOptions then ns.RefreshOptions() end
     if ns.RefreshBagOverlays then ns.RefreshBagOverlays() end
+    if ns.RefreshTradeExceptions then ns.RefreshTradeExceptions() end
     return true
 end
 
--- Officer-driven change: bump epoch, apply locally, broadcast to the guild.
+-- Officer-driven change: bump epoch, apply locally, broadcast to the guild. Members
+-- are not notified in chat on receipt; the officer's own confirmation is printed
+-- locally (a non-silent ApplyRuleset here, or the commitGuild caller's own print).
 function Addon:SetRulesetAsOfficer(phase, mode, silent)
     local r = self:GetRuleset()
-    self:ApplyRuleset(phase, mode, r.epoch + 1, UnitName("player"), nil, nil, nil, nil, silent)
+    self:ApplyRuleset(phase, mode, r.epoch + 1, UnitName("player"), nil, nil, nil, nil, nil, nil, nil, nil, silent)
     local comm = self:GetModule("Comm", true)
     if comm then comm:BroadcastRuleset() end
 end
@@ -291,7 +397,7 @@ function Addon:IsOfficer(name)
     end
     local rankIndex = self:GetGuildRankIndex(name)
     if not rankIndex then return false end
-    return rankIndex <= self.db.global.officerRankIndex
+    return rankIndex <= (self:GetRuleset().officerRankIndex or 1)
 end
 
 -- ---------------------------------------------------------------------------
@@ -318,7 +424,8 @@ end
 -- Slash command
 -- ---------------------------------------------------------------------------
 function Addon:HandleSlash(input)
-    input = (input or ""):lower():trim()
+    local raw = (input or ""):trim()          -- original case preserved (player names)
+    input = raw:lower()
     if input == "status" then
         local r = self:GetRuleset()
         local data = self:GetPhaseData()
@@ -334,6 +441,23 @@ function Addon:HandleSlash(input)
         end
     elseif input == "roster" then
         if ns.ToggleRoster then ns.ToggleRoster() end
+    elseif input == "clearflag" or input:match("^clearflag%s") then
+        -- Officer-only: clear a member's saved integrity flags (Guild Found tamper
+        -- and/or "addon not detected") and sync the clear to the guild. Name is
+        -- taken from the original-case input.
+        local name = raw:match("^%S+%s+(.+)$")
+        if not name or name == "" then
+            self:Print("Usage: /sodlock clearflag <player> — clears a member's saved flag(s) (officer only).")
+        elseif not self:IsOfficer() then
+            self:Print("|cffff3030Only an officer can clear a saved flag.|r")
+        else
+            local c = self:GetModule("Compliance", true)
+            if c and c.OfficerClear and c:OfficerClear(name) then
+                self:Print(string.format("Cleared saved flag(s) on |cffffd100%s|r (synced to the guild).", name))
+            else
+                self:Print(string.format("No saved flag on |cffffd100%s|r.", name))
+            end
+        end
     elseif input == "scan" then
         local e = self:GetModule("Enforcement", true)
         if e then e:FullScan(); self:Print("Re-scanned current state.") end

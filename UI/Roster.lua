@@ -5,8 +5,8 @@ local AceGUI = LibStub("AceGUI-3.0")
 local frame
 
 -- Relative column widths; each set must sum to ~1.0
--- Guild: Player | Lvl | Phase | Mode | XP | Status | (kick)
-local GUILD_COL_W = { 0.22, 0.06, 0.08, 0.10, 0.10, 0.30, 0.14 }
+-- Guild: Player | Lvl | Phase | Mode | XP | Status | (clear) | (kick)
+local GUILD_COL_W = { 0.20, 0.06, 0.07, 0.09, 0.08, 0.26, 0.12, 0.12 }
 -- Group: Player | Lvl | Class | Range | Status
 local GROUP_COL_W = { 0.24, 0.07, 0.15, 0.16, 0.38 }
 
@@ -17,6 +17,26 @@ StaticPopupDialogs["SODPHASELOCK_KICK_CONFIRM"] = {
     button2 = CANCEL,
     OnAccept = function(self, data)
         GuildUninvite(data)
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- Officer-only clear of a member's saved integrity flag(s) — Guild Found tamper,
+-- "addon not detected", and/or a played-without-addon gap. The clear syncs to the
+-- whole guild (see Compliance:OfficerClear), so the record is dismissed everywhere
+-- — a played gap is forgiven (the member's counter resets), the others until the
+-- member is next caught.
+StaticPopupDialogs["SODPHASELOCK_GFCLEAR_CONFIRM"] = {
+    text = "Clear the saved flag(s) on %s?\n\nThe record is dismissed guild-wide: a played-without-addon gap is forgiven (their counter resets), other flags return only if they are next caught (Guild Found disabled locally, or online with no addon).",
+    button1 = OKAY,
+    button2 = CANCEL,
+    OnAccept = function(self, data)
+        if ns.Compliance and ns.Compliance.OfficerClear then
+            ns.Compliance:OfficerClear(data)
+        end
     end,
     timeout = 0,
     whileDead = true,
@@ -52,9 +72,17 @@ local function addCell(grp, text, width, colorCode)
     grp:AddChild(lbl)
 end
 
--- Guild data row: labels + a Kick button (officer-only) as the trailing column.
-local function addGuildRow(parent, cells, colorCode, playerName)
-    local canKick = Addon:IsOfficer() and (playerName ~= UnitName("player"))
+-- Guild data row: labels + a Clear button (officer-only, only for a flagged
+-- member) and a Kick button (officer-only) as the trailing columns.
+local function addGuildRow(parent, cells, colorCode, playerName, flagged)
+    local isSelf   = (playerName == UnitName("player"))
+    local officer  = Addon:IsOfficer()
+    local canKick  = officer and not isSelf
+    -- Clear is allowed on yourself: the "can't self-clear" rule is about untrusted
+    -- MEMBERS (who never get this button), not officers — an officer clearing their own
+    -- stale flag is legitimate. OfficerClear only gates on the caller being an officer,
+    -- and its clear/forgive syncs guild-wide for self exactly as for anyone else.
+    local canClear = officer and flagged
 
     local grp = AceGUI:Create("SimpleGroup")
     grp:SetFullWidth(true)
@@ -63,8 +91,22 @@ local function addGuildRow(parent, cells, colorCode, playerName)
         addCell(grp, text, GUILD_COL_W[i], colorCode)
     end
 
+    -- Clear column: an officer-only button on a flagged row, otherwise an empty
+    -- spacer of the same width so every row's columns stay aligned.
+    if canClear then
+        local clr = AceGUI:Create("Button")
+        clr:SetRelativeWidth(GUILD_COL_W[7])
+        clr:SetText("Clear")
+        clr:SetCallback("OnClick", function()
+            StaticPopup_Show("SODPHASELOCK_GFCLEAR_CONFIRM", playerName, nil, playerName)
+        end)
+        grp:AddChild(clr)
+    else
+        addCell(grp, "", GUILD_COL_W[7], colorCode)
+    end
+
     local btn = AceGUI:Create("Button")
-    btn:SetRelativeWidth(GUILD_COL_W[7])
+    btn:SetRelativeWidth(GUILD_COL_W[8])
     btn:SetText("Kick")
     btn:SetDisabled(not canKick)
     if canKick then
@@ -93,9 +135,16 @@ end
 -- ---------------------------------------------------------------------------
 -- Guild Compliance tab (synced status pings)
 -- ---------------------------------------------------------------------------
+-- Cap on names listed in the "Addon Not Detected" section, so a low-adoption or
+-- huge guild can't render a wall of rows. Extra members collapse to a count.
+local NOT_DETECTED_CAP = 25
+
 local function BuildGuildRows(scroll)
     local list = ns.Compliance and ns.Compliance:GetSorted() or {}
-    if #list == 0 then
+    -- Integrity view ("Addon Not Detected") is officer-only.
+    local unreported = (Addon:IsOfficer() and ns.Compliance and ns.Compliance:GetIntegrityRows()) or {}
+
+    if #list == 0 and #unreported == 0 then
         addNote(scroll, "\nNo reports yet. Guild members running this addon will appear here within a minute.")
         return
     end
@@ -106,35 +155,66 @@ local function BuildGuildRows(scroll)
     end
     local nOK = #list - nViol
 
-    addHeader(scroll, { "Player", "Lvl", "Phase", "Mode", "XP", "Status", "" }, GUILD_COL_W)
+    addHeader(scroll, { "Player", "Lvl", "Phase", "Mode", "XP", "Status", "", "" }, GUILD_COL_W)
 
-    if nViol > 0 then
-        addSep(scroll, string.format("|cffff4040Out of Compliance (%d)|r", nViol))
-    else
-        addSep(scroll, string.format("|cff40ff40All Compliant (%d)|r", nOK))
+    if #list > 0 then
+        if nViol > 0 then
+            addSep(scroll, string.format("|cffff4040Out of Compliance (%d)|r", nViol))
+        else
+            addSep(scroll, string.format("|cff40ff40All Compliant (%d)|r", nOK))
+        end
+
+        local shownCompliantHeader = (nViol == 0)
+        for _, e in ipairs(list) do
+            local i = e.info
+            if i.compliant and not shownCompliantHeader then
+                addSep(scroll, string.format("|cff40ff40Compliant (%d)|r", nOK))
+                shownCompliantHeader = true
+            end
+            local color = i.compliant and "|cff40ff40" or "|cffff4040"
+            addGuildRow(scroll, {
+                e.name,
+                tostring(i.level or "?"),
+                "P" .. tostring(i.phase or "?"),
+                i.mode or "?",
+                i.xpLocked and "|cff40ff40Locked|r" or "|cff808080—|r",
+                i.reasons or "OK",
+            }, color, e.name, ns.Compliance and
+                (ns.Compliance:IsFlagged(e.name) or ns.Compliance:HasPlayedGap(e.name)))
+        end
     end
 
-    local shownCompliantHeader = (nViol == 0)
-    for _, e in ipairs(list) do
-        local i = e.info
-        if i.compliant and not shownCompliantHeader then
-            addSep(scroll, string.format("|cff40ff40Compliant (%d)|r", nOK))
-            shownCompliantHeader = true
+    -- Integrity: guildmates not reporting in. Orange, kept visually distinct from
+    -- red rule-violations — non-participation is an accountability signal, not a
+    -- measured violation, and can't be told apart from "hasn't installed it yet".
+    -- Includes online members with no fresh ping AND saved "addon not detected"
+    -- records (which persist after the member logs off, until an officer clears them).
+    if #unreported > 0 then
+        addSep(scroll, string.format("|cffff8000Addon Not Detected (%d)|r", #unreported))
+        addNote(scroll, "|cff808080Guild members with no recent status ping — the addon is off, not installed, or blocking guild sync. A member seen online without pinging for a sustained period is saved here (marked \"saved\") so the record survives their logout; clear it with the Clear button or /sodlock clearflag. Best-effort only: a modified addon can still report in. Allow a minute after someone logs in.|r")
+        for idx, r in ipairs(unreported) do
+            if idx > NOT_DETECTED_CAP then
+                addNote(scroll, string.format("|cff808080…and %d more member(s) not detected.|r", #unreported - NOT_DETECTED_CAP))
+                break
+            end
+            local statusText
+            if r.saved then
+                statusText = r.online and "|cffff8000Addon not detected (saved)|r"
+                                       or  "|cffff8000Addon not detected (saved, offline)|r"
+            else
+                statusText = "|cffff8000Addon not detected|r"
+            end
+            addGuildRow(scroll, {
+                r.name, "—", "—", "—", "—", statusText,
+            }, "|cffff8000", r.name, r.saved)
         end
-        local color = i.compliant and "|cff40ff40" or "|cffff4040"
-        addGuildRow(scroll, {
-            e.name,
-            tostring(i.level or "?"),
-            "P" .. tostring(i.phase or "?"),
-            i.mode or "?",
-            i.xpLocked and "|cff40ff40Locked|r" or "|cff808080—|r",
-            i.reasons or "OK",
-        }, color, e.name)
     end
 
     if frame then
+        local interval = math.floor((ns.Comm and ns.Comm.StatusInterval and ns.Comm:StatusInterval()) or 60)
+        local extra = (#unreported > 0) and string.format(", %d not detected", #unreported) or ""
         frame:SetStatusText(string.format(
-            "%d out of compliance, %d compliant — reports every ~60s", nViol, nOK))
+            "%d out of compliance, %d compliant%s — reports every ~%ds", nViol, nOK, extra, interval))
     end
 end
 
@@ -335,6 +415,16 @@ local function contentSignature()
                 tostring(i.mode or "?"), i.xpLocked and "1" or "0",
                 i.compliant and "1" or "0", i.reasons or "",
             }, "\1")
+        end
+        -- Presence of the "not detected" set feeds the view too, so a member
+        -- dropping off (or coming back) rebuilds the roster. Officer-only, to match
+        -- the display path above.
+        local unreported = (Addon:IsOfficer() and ns.Compliance and ns.Compliance:GetIntegrityRows()) or {}
+        parts[#parts + 1] = "u"
+        -- Fold each row's online/saved state in so a change (a member logging off, a
+        -- flag being saved or cleared) rebuilds the section and its Clear buttons.
+        for _, r in ipairs(unreported) do
+            parts[#parts + 1] = r.name .. (r.online and "O" or "o") .. (r.saved and "S" or "s")
         end
     end
     return table.concat(parts, "\2")
