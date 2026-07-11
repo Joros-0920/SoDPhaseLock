@@ -26,6 +26,13 @@ local function fmtDuration(seconds)
     return string.format("%dm", math.floor(seconds / 60))
 end
 
+-- Sign-aware, gold-rounded money for the wealth-integrity reason ("+340g" / "-12g").
+local function fmtMoney(copper)
+    copper = copper or 0
+    local gold = copper / 10000
+    return string.format("%+dg", (gold >= 0) and math.floor(gold + 0.5) or -math.floor(-gold + 0.5))
+end
+
 -- ---------------------------------------------------------------------------
 -- Persisted integrity flags (see Core.lua db.global.gfFlags).
 --
@@ -43,6 +50,12 @@ end
 --             this one auto-clears the moment we hear from them (see Record); the
 --             officer clear is for dismissing the saved record of someone who
 --             stays gone (e.g. offline / left the guild).
+--
+-- (The Guild Found wealth-integrity discrepancy is NOT a saved flag: like the played
+-- gap it is a durable counter in the MEMBER's own SavedVariables, reported every ping
+-- until an officer forgives it via Comm "WGF", so it needs no receiver-side record. It
+-- is derived live in Record and drives the Clear button through HasWealthGap. See
+-- Modules/Integrity.lua.)
 --
 -- Entry: bucket[lc-name] = { name = <ProperShort>, gf = <time()>, noaddon = <time()> }
 -- (a key present ⇒ flagged for that reason). Keyed by lowercased short name so
@@ -127,6 +140,17 @@ function Compliance:ClearNoAddonFlag(name)
     if not e.gf then flagsBucket()[k] = nil end
 end
 
+-- Self-heal counterpart to ClearNoAddonFlag: drop just the "Guild Found disabled locally"
+-- flag when the member is observed back in sync (matching gf at our epoch), dropping the
+-- whole entry if nothing is left. Local-only — every officer's client heals independently as
+-- it sees the corrected ping, so unlike the officer Clear action this needs no "GFC" broadcast.
+function Compliance:ClearGFFlagAuto(name)
+    local e, k = flagEntry(name)
+    if not e or not e.gf then return end
+    e.gf = nil
+    if not e.noaddon then flagsBucket()[k] = nil end
+end
+
 -- Remove ALL saved flags for a member (the officer "Clear" action clears the
 -- whole record). Callers handle any broadcast.
 function Compliance:ClearFlag(name)
@@ -167,17 +191,38 @@ function Compliance:Record(sender, data)
     if playedThr > 0 and (data.up or 0) >= playedThr then
         reasons[#reasons + 1] = string.format("played %s without addon", fmtDuration(data.up))
     end
+    -- Guild Found wealth integrity: gold/items that moved across a window the member's
+    -- addon was unloaded (see Modules/Integrity.lua). Evaluated only when Guild Found is
+    -- active in OUR ruleset (open economy ⇒ nothing to reconcile); a member who hasn't
+    -- synced never accumulated (their own Guild Found was off), so they report zero and
+    -- can't be false-flagged. Items always count; the money side uses the synced gold
+    -- threshold. Durable like the played gap — reported every ping until an officer
+    -- forgives it — so no saved flag is needed.
+    if Addon:WealthIntegrityOn() then
+        local grace    = Addon:WealthGraceCopper()
+        local moneyHit = grace > 0 and math.abs(data.wm or 0) >= grace
+        local itemHit  = (data.wq or 0) > 0
+        if moneyHit or itemHit then
+            local parts = {}
+            if moneyHit then parts[#parts + 1] = fmtMoney(data.wm) end
+            if itemHit  then parts[#parts + 1] = string.format("%d item(s)", data.wq) end
+            reasons[#reasons + 1] = "Guild Found: " .. table.concat(parts, ", ") .. " while addon off"
+        end
+    end
     -- Tamper signal: a Guild Found restriction the guild has ON, but this member's addon
-    -- reports OFF locally — their SavedVariables were edited to opt out. Guild Found is
-    -- ONLY ever guild-controlled and always advances with the epoch, so an honest member
-    -- AT OUR EPOCH necessarily reports the same gf we hold; only a local edit can differ.
+    -- reports OFF locally — their SavedVariables were edited to opt out.
     --
-    -- Gate the WHOLE check on equal epoch: a member who simply hasn't synced yet (lower
-    -- epoch — a stale pre-sync ping, or someone returning after time offline whose ruleset
-    -- is still at its all-off defaults) must NOT be mis-flagged. That case is already
-    -- surfaced as "out-of-sync ruleset"; without this gate the default-off gf tripped a
-    -- PERSISTED "Guild Found disabled locally" during the login/sync window. A modified
-    -- addon can still forge these to match; this only catches the low-effort SavedVars edit.
+    -- Gate the whole check on equal epoch: a member who hasn't synced yet (lower epoch — a
+    -- stale pre-sync ping, or someone returning after time offline) carries the all-off
+    -- defaults and is surfaced as "out-of-sync ruleset" instead. But equal epoch does NOT by
+    -- itself prove equal gf: in a mixed-version guild a pre-GuildFound client (≤0.6.x) relays
+    -- our epoch WITHOUT the gf payload, leaving a freshly-upgraded 0.7 member at our epoch with
+    -- default (all-off) Guild Found through no fault of their own (Comm's "R" handler now
+    -- re-syncs to close that window). So this signal must be SELF-HEALING, not sticky: set the
+    -- flag while the mismatch persists at our epoch, and CLEAR it the moment the member reports
+    -- matching gf. A genuine local edit keeps reporting a mismatch and stays flagged; a rollout
+    -- desync clears itself once the member converges. (A code edit can forge a match regardless;
+    -- the transient disable→act→re-enable case is covered by wealth integrity, not this flag.)
     if type(data.gf) == "table" and data.epoch == Addon:GetRuleset().epoch then
         local mine = Addon:GetRuleset().guildFound
         local overridden = false
@@ -191,9 +236,11 @@ function Compliance:Record(sender, data)
             for _ in pairs(mine.tradeExceptions) do myCount = myCount + 1 end
             if data.gfxn ~= myCount then overridden = true end
         end
-        -- Observing the tamper writes a persisted flag the first time; from then on
-        -- it sticks regardless of what this member reports, until an officer clears it.
-        if overridden then self:SetGFFlag(name) end
+        if overridden then
+            self:SetGFFlag(name)
+        else
+            self:ClearGFFlagAuto(name)   -- in sync at our epoch → lift any stale flag
+        end
     end
 
     -- (Removed) Master-switch tamper check on `data.en`: it assumed a local "Enable"
@@ -223,6 +270,9 @@ function Compliance:Record(sender, data)
         xpLocked   = data.vX == 1,   -- informational; intentionally excluded from reasons/compliant
         version    = data.v,         -- reporter's addon version, for the roster's version column
         unobserved = data.up or 0,   -- reported /played-with-addon-off seconds (drives the Clear/forgive button)
+        wealthMoney = data.wm or 0,  -- reported signed copper moved across an addon-off gap
+        wealthItems = data.wq or 0,  -- reported distinct itemIDs gained across the gap
+        wealthLog  = data.wl,        -- bounded gained-itemID list, for the officer display
         compliant  = (#reasons == 0),
         reasons    = (#reasons == 0) and "OK" or table.concat(reasons, ", "),
         updated    = GetTime(),
@@ -268,6 +318,17 @@ function Compliance:HasPlayedGap(name)
     return info ~= nil and (info.unobserved or 0) >= thr
 end
 
+-- Does this member's live row show a Guild Found wealth discrepancy over the synced
+-- threshold? Drives the Clear-button visibility and the wealth-forgive path.
+function Compliance:HasWealthGap(name)
+    if not Addon:WealthIntegrityOn() then return false end
+    local info = self.roster[rosterKey(self, name)]
+    if not info then return false end
+    local grace = Addon:WealthGraceCopper()
+    local moneyHit = grace > 0 and math.abs(info.wealthMoney or 0) >= grace
+    return moneyHit or (info.wealthItems or 0) > 0
+end
+
 -- Officer action: clear everything an officer can dismiss for a member — the saved
 -- integrity flag(s) (Guild Found tamper and/or "addon not detected") AND a
 -- played-without-addon gap — and sync it guild-wide so it disappears for every officer
@@ -281,7 +342,8 @@ function Compliance:OfficerClear(name)
     local short   = Ambiguate(name, "short")
     local flagged = self:IsFlagged(name)
     local played  = self:HasPlayedGap(name)
-    if not flagged and not played then return false end
+    local wealth  = self:HasWealthGap(name)
+    if not flagged and not played and not wealth then return false end
     if flagged then
         self:ApplyClear(name)
         if ns.Comm and ns.Comm.BroadcastGFClear then
@@ -292,6 +354,12 @@ function Compliance:OfficerClear(name)
         -- Reaches the member, who zeroes their counter and re-pings; the row clears on
         -- that ping. Officers take no local action (only the named member does).
         ns.Comm:BroadcastPlayedForgive(short)
+    end
+    if wealth and ns.Comm and ns.Comm.BroadcastWealthForgive then
+        -- Also reset the member's wealth counters — clearing the sticky flag above is not
+        -- enough, since their next ping would still report the discrepancy and re-flag them
+        -- (same reason the played gap needs a forgive). Only the named member acts.
+        ns.Comm:BroadcastWealthForgive(short)
     end
     return true
 end

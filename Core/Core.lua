@@ -63,6 +63,15 @@ local defaults = {
                     auction = false,   -- may not use the Auction House
                     allowConjured = false,  -- exempt conjured items (mage food, healthstones…) from the trade rule
                     allowTradeWindow = false,  -- exempt items still in their group-loot trade window (BIND_TRADE_TIME_REMAINING) from the trade rule
+                    -- Wealth integrity: when Guild Found is on, flag gold/items that
+                    -- appeared (or left) across a window the addon was unloaded — the
+                    -- closed-economy blind spot when a member disables the addon, moves
+                    -- value with an outsider, and re-enables it. Auto-active whenever any
+                    -- restriction above is on; `integrity` lets a guild leader opt out.
+                    -- `wealthGrace` = gold a net cross-gap money change may reach before
+                    -- it counts (items always count). See Modules/Integrity.lua.
+                    integrity   = true,
+                    wealthGrace = 10,
                     -- Trade allowlist: item IDs that MAY be traded cross-guild even
                     -- when `trade` is on. If non-empty, a cross-guild trade is allowed
                     -- as long as it contains only these items and no gold. Keyed by
@@ -104,6 +113,20 @@ local defaults = {
         -- the dishonesty metric reported in the status ping. See Modules/Playtime.lua.
         playtime = {
             unobserved = 0,
+        },
+        -- Guild Found wealth-integrity baseline (per realm-character). `money`/`items`
+        -- are the last observed snapshot (copper, and bag itemID→count) the addon saw
+        -- while loaded; on a login that Playtime attributes to an addon-off gap, the
+        -- difference from this snapshot is folded into the `unaccounted*` counters (the
+        -- metric reported in the status ping) before the snapshot is refreshed. Reset by
+        -- an officer forgive. Bags only — bank contents are unreadable unless the bank
+        -- frame is open. See Modules/Integrity.lua.
+        wealth = {
+            money            = nil,   -- copper baseline (nil until first snapshot)
+            items            = {},    -- itemID → count baseline (bags only)
+            unaccountedMoney = 0,     -- signed copper accrued across unmonitored gaps
+            unaccountedItems = 0,     -- count of distinct itemIDs gained across gaps
+            itemLog          = {},    -- bounded set of gained itemIDs, for the officer display
         },
     },
     profile = {
@@ -285,6 +308,21 @@ function Addon:GuildFoundAny()
     return (gf.trade or gf.mail or gf.auction) and true or false
 end
 
+-- Wealth integrity is active only inside a closed economy (some Guild Found
+-- restriction on) and unless a guild leader has opted out. A member with no Guild
+-- Found restriction has an open economy, so there's nothing to reconcile.
+function Addon:WealthIntegrityOn()
+    return self:GuildFoundAny() and (self:GetRuleset().guildFound.integrity ~= false)
+end
+
+-- Threshold in COPPER a net cross-gap money change must reach to count (0 = off).
+-- Reads the synced ruleset so every client evaluates a member's report against the
+-- same guild-leader-set tolerance. Items always count regardless of this.
+function Addon:WealthGraceCopper()
+    local g = self:GetRuleset().guildFound.wealthGrace or 10
+    return (g > 0) and (g * 10000) or 0
+end
+
 -- Apply a ruleset (from local officer action or an incoming broadcast).
 -- `enforce`, `autoUnequip` and `instanceGrace` are the guild-controlled
 -- enforcement config; they are only present on incoming broadcasts. For local
@@ -318,6 +356,12 @@ function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, ins
         r.guildFound.auction = guildFound.auction and true or false
         r.guildFound.allowConjured = guildFound.allowConjured and true or false
         r.guildFound.allowTradeWindow = guildFound.allowTradeWindow and true or false
+        -- Wealth integrity (default on if absent, so an older officer's broadcast that
+        -- predates the field doesn't silently disable it on newer clients).
+        if guildFound.integrity ~= nil then
+            r.guildFound.integrity = guildFound.integrity and true or false
+        end
+        if guildFound.wealthGrace ~= nil then r.guildFound.wealthGrace = guildFound.wealthGrace end
         -- Trade allowlist: replace wholesale (a list of item IDs, not a boolean).
         if type(guildFound.tradeExceptions) == "table" then
             local ex = r.guildFound.tradeExceptions

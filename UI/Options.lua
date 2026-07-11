@@ -1663,6 +1663,29 @@ local options = {
                                 commitGuild("Guild Found: Auction House: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
                             end,
                         },
+                        integrity = {
+                            type = "toggle", order = 4, name = "Flag off-radar gold/items",
+                            desc = "While any Guild Found restriction above is on, detect gold or items that moved across a window a member had the addon disabled — the closed-economy blind spot when someone turns the addon off, trades or mails value with an outsider, then turns it back on. The next login the addon was loaded, it compares wealth against the last snapshot it saw and reports the difference, flagging the member for officer review. Best-effort/heuristic (officers judge legitimate sources like mob loot or quest gold); a modified addon can still forge it.",
+                            width = "full",
+                            disabled = notGuildLeader,
+                            get = function() return Addon:GetRuleset().guildFound.integrity ~= false end,
+                            set = function(_, v)
+                                Addon:GetRuleset().guildFound.integrity = v
+                                commitGuild("Guild Found — flag off-radar gold/items: " .. (v and "|cff00ff00enabled|r" or "|cffff8080disabled|r"))
+                            end,
+                        },
+                        wealthGrace = {
+                            type = "range", order = 5, name = "Off-radar gold tolerance (gold)",
+                            desc = "How much a member's net gold change across an addon-off window may reach before it's flagged. New items are always flagged regardless of this. Keep some slack for normal earnings during an honest login without the addon.",
+                            width = "full",
+                            min = 0, max = 500, step = 5,
+                            disabled = function() return notGuildLeader() or (Addon:GetRuleset().guildFound.integrity == false) end,
+                            get = function() return Addon:GetRuleset().guildFound.wealthGrace or 10 end,
+                            set = function(_, v)
+                                Addon:GetRuleset().guildFound.wealthGrace = v
+                                commitGuild("Guild Found — off-radar gold tolerance: " .. v .. "g")
+                            end,
+                        },
                     },
                 },
             },

@@ -192,7 +192,8 @@ local function BuildGuildRows(scroll)
                 versionCell(i.version),
                 i.reasons or "OK",
             }, color, e.name, ns.Compliance and
-                (ns.Compliance:IsFlagged(e.name) or ns.Compliance:HasPlayedGap(e.name)))
+                (ns.Compliance:IsFlagged(e.name) or ns.Compliance:HasPlayedGap(e.name)
+                 or ns.Compliance:HasWealthGap(e.name)))
         end
     end
 

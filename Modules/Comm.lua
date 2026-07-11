@@ -36,7 +36,10 @@ local function compareVersions(a, b)
 end
 
 -- Message types: "R" ruleset, "REQ" request current ruleset, "S" status,
---                "GFC" officer-cleared a persisted Guild Found tamper flag
+--                "GFC" officer-cleared a persisted Guild Found tamper flag,
+--                "PGF" officer forgave a played-without-addon gap,
+--                "WGF" officer forgave a Guild Found wealth-integrity discrepancy,
+--                "PWQ"/"PWA" played-witness query/answer
 --
 -- Traffic budget: WoW's server drops guild addon messages above a low aggregate
 -- rate, so everything below is designed to keep guild-wide chatter bounded even
@@ -250,6 +253,12 @@ function Comm:SendStatus()
         en    = Addon.db.profile.enabled and 1 or 0,  -- local master switch; 0 ⇒ NOTHING is enforced (Guild Found included)
         up    = (ns.Playtime and ns.Playtime:GetUnobserved()) or 0,  -- cumulative /played seconds accrued with the addon NOT loaded
         ob    = ns.Playtime and ns.Playtime:GetObserved() or nil,    -- witnessed-/played high-water, so peers can reconcile our alternate PCs
+        -- Guild Found wealth integrity: cumulative gold/items that moved across an
+        -- addon-off gap (see Modules/Integrity.lua). Receivers evaluate against the
+        -- synced threshold and set a sticky flag, like the played gap above.
+        wm    = (ns.Integrity and ns.Integrity:GetUnaccountedMoney()) or 0,  -- signed copper
+        wq    = (ns.Integrity and ns.Integrity:GetUnaccountedItems()) or 0,  -- distinct itemIDs gained
+        wl    = ns.Integrity and ns.Integrity:GetItemLog() or nil,           -- bounded gained-itemID list (display)
         v     = VERSION,                         -- addon version, for out-of-date detection
     })
 end
@@ -269,6 +278,15 @@ end
 function Comm:BroadcastPlayedForgive(player)
     if not player or player == "" then return end
     send({ t = "PGF", player = player, by = UnitName("player"), v = VERSION })
+end
+
+-- An officer forgave a member's Guild Found wealth-integrity discrepancy. Broadcast
+-- guild-wide so it reaches the flagged MEMBER (who zeroes their counters and re-snapshots)
+-- as well as every officer. Carries the officer's name (`by`) for authority validation on
+-- receipt, exactly like "PGF".
+function Comm:BroadcastWealthForgive(player)
+    if not player or player == "" then return end
+    send({ t = "WGF", player = player, by = UnitName("player"), v = VERSION })
 end
 
 -- Ask the guild what /played high-water it has witnessed for US, so an alternate PC
@@ -327,8 +345,23 @@ function Comm:OnComm(prefix, message, distribution, sender)
         -- Apply silently: members are not notified in chat when a ruleset is broadcast
         -- to them. The officer who made the change still sees their own local confirmation
         -- (printed on their client by ApplyRuleset / commitGuild).
+        local beforeEpoch = Addon:GetRuleset().epoch
         Addon:ApplyRuleset(data.phase, data.mode, data.epoch, data.by,
             data.enforce, data.auto, data.grace, data.npd, data.gf, data.pgc, data.pgg, data.orank, true)
+        -- Mixed-version rollout: a pre-GuildFound client (≤0.6.x) relays the ruleset with
+        -- NO `gf` payload, so ApplyRuleset can't touch our guildFound (it only writes it when
+        -- a gf table is present). If such a relay just ADVANCED our epoch, we now sit at the
+        -- guild's current epoch carrying stale/default (all-off) Guild Found — which both
+        -- mis-enforces locally AND trips the officer-side "Guild Found disabled locally" tamper
+        -- flag (an honest member is falsely accused, since epoch-equality no longer implies
+        -- gf-equality). Re-request sync so a gf-bearing ruleset from the leader / any 0.7+ peer
+        -- corrects us. One in flight at a time; harmless (idempotent) if we were already synced.
+        if data.gf == nil and Addon:GetRuleset().epoch > beforeEpoch and not self.gfResyncTimer then
+            self.gfResyncTimer = self:ScheduleTimer(function()
+                self.gfResyncTimer = nil
+                self:RequestSync()
+            end, 1 + math.random() * REQ_SPREAD)
+        end
 
     elseif data.t == "REQ" then
         -- Answer with our cached ruleset so newcomers sync. The receiver still
@@ -366,6 +399,16 @@ function Comm:OnComm(prefix, message, distribution, sender)
         if data.player and ns.Playtime
            and Ambiguate(data.player, "short") == me then
             ns.Playtime:Rebaseline()
+        end
+
+    elseif data.t == "WGF" then
+        -- Officer forgave a member's Guild Found wealth discrepancy. Authority is tied to
+        -- the clearer (data.by), like "PGF". Only the named member acts on it — they zero
+        -- their counters and re-snapshot, then push a fresh ping so the row clears.
+        if not Addon:IsOfficer(data.by) then return end
+        if data.player and ns.Integrity
+           and Ambiguate(data.player, "short") == me then
+            ns.Integrity:Rebaseline()
         end
 
     elseif data.t == "PWQ" then

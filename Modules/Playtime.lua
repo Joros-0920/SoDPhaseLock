@@ -96,6 +96,12 @@ local function attributeLogin(serverNow)
     if added and ns.Comm and ns.Comm.SendStatus then
         ns.Comm:SendStatus()
     end
+    -- Hand the same login-gap signal to the Guild Found wealth-integrity tracker so it
+    -- can diff gold/bags across the unmonitored window (see Modules/Integrity.lua).
+    -- Playtime stays the sole gap detector; Integrity is a passive consumer.
+    if ns.Integrity and ns.Integrity.OnLoginAttributed then
+        ns.Integrity:OnLoginAttributed(gap, added)
+    end
 end
 
 -- ---------------------------------------------------------------------------
