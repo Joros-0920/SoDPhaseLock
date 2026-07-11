@@ -22,6 +22,16 @@ ns.Playtime = Playtime
 -- so none is miscounted.
 local TOLERANCE = 180
 local ADVANCE_INTERVAL = 60
+-- The Guild Found wealth-integrity check (Modules/Integrity.lua) reuses this same login-gap
+-- signal but with a MUCH smaller tolerance. Rationale: a closed economy has no acceptable
+-- window of unmonitored play, so we want to flag far shorter addon-off gaps for wealth than
+-- the 180s the played counter needs. It's safe to go this low precisely for wealth because
+-- (1) the wealth baseline is maintained CONTINUOUSLY while loaded (steady-state money/bag
+-- events, independent of ADVANCE_INTERVAL), so a crash that inflates the /played gap does NOT
+-- inflate the wealth diff, and (2) the fold only ever reports a NONZERO change — a spurious
+-- short gap with no actual wealth movement folds to nothing. So the 180s crash-slop guard the
+-- played flag needs simply doesn't apply here. Kept above ~0 to absorb login/logout processing.
+local WEALTH_TOLERANCE = 5
 -- How long after login we let the guild answer our high-water query (Comm sends the
 -- "PWQ" a few seconds in) before attributing any cross-session gap. Must comfortably
 -- exceed Comm's PWQ send + reply jitter so an honest alternate PC adopts its shared
@@ -98,9 +108,11 @@ local function attributeLogin(serverNow)
     end
     -- Hand the same login-gap signal to the Guild Found wealth-integrity tracker so it
     -- can diff gold/bags across the unmonitored window (see Modules/Integrity.lua).
-    -- Playtime stays the sole gap detector; Integrity is a passive consumer.
+    -- Playtime stays the sole gap detector; Integrity is a passive consumer. The wealth
+    -- path evaluates on the tighter WEALTH_TOLERANCE (independent of the 180s played flag),
+    -- so a shorter addon-off window still catches off-radar gold/items.
     if ns.Integrity and ns.Integrity.OnLoginAttributed then
-        ns.Integrity:OnLoginAttributed(gap, added)
+        ns.Integrity:OnLoginAttributed(gap, added, gap > WEALTH_TOLERANCE)
     end
 end
 

@@ -5,8 +5,10 @@ local AceGUI = LibStub("AceGUI-3.0")
 local frame
 
 -- Relative column widths; each set must sum to ~1.0
--- Guild: Player | Lvl | Phase | Mode | XP | Ver | Status | (clear) | (kick)
-local GUILD_COL_W = { 0.19, 0.05, 0.06, 0.08, 0.07, 0.08, 0.23, 0.12, 0.12 }
+-- Guild: Player | Lvl | Phase | Mode | XP | Ver | Status | (audit) | (clear) | (kick)
+-- Sum kept a touch under 1.0 so the extra (10th) cell's Flow spacing can't wrap the
+-- trailing buttons onto a second line.
+local GUILD_COL_W = { 0.165, 0.05, 0.05, 0.07, 0.06, 0.065, 0.19, 0.10, 0.10, 0.10 }
 -- Group: Player | Lvl | Class | Range | Status
 local GROUP_COL_W = { 0.24, 0.07, 0.15, 0.16, 0.38 }
 
@@ -44,6 +46,106 @@ StaticPopupDialogs["SODPHASELOCK_GFCLEAR_CONFIRM"] = {
     preferredIndex = 3,
 }
 
+-- ---------------------------------------------------------------------------
+-- Guild Found wealth "Audit" window: itemises the gold and items a member's status
+-- ping reported as having moved while their addon was off (Modules/Integrity.lua).
+-- The item IDs ride the ping as `wl` and are stored on the roster row as `wealthLog`;
+-- money as `wealthMoney`. Opened from the officer/self "Audit" button on a flagged row.
+-- ---------------------------------------------------------------------------
+local auditFrame
+local auditPlayer
+
+-- Full-width note line (local copy so the audit window, defined above the shared
+-- addNote helper, doesn't depend on its declaration order).
+local function addNoteInline(parent, text)
+    local lbl = AceGUI:Create("Label")
+    lbl:SetFullWidth(true)
+    lbl:SetText(text)
+    parent:AddChild(lbl)
+end
+
+-- Signed copper → readable money. Uses Blizzard's coin-icon string when present.
+local function fmtAuditMoney(copper)
+    copper = copper or 0
+    if copper == 0 then return "|cff808080none|r" end
+    local sign = (copper < 0) and "-" or "+"
+    local abs  = math.abs(copper)
+    local body = (GetCoinTextureString and GetCoinTextureString(abs))
+                 or (string.format("%dg", math.floor(abs / 10000)))
+    return sign .. " " .. body
+end
+
+local function ShowAudit(playerName, isRetry)
+    auditPlayer = playerName
+    if auditFrame then auditFrame:Release() end
+    auditFrame = AceGUI:Create("Frame")
+    auditFrame:SetTitle("Audit — " .. tostring(playerName))
+    auditFrame:SetStatusText("Gold and items reported")
+    auditFrame:SetWidth(360)
+    auditFrame:SetHeight(360)
+    auditFrame:SetLayout("Fill")
+    auditFrame:EnableResize(false)
+    auditFrame:SetCallback("OnClose", function(w)
+        AceGUI:Release(w)
+        if auditFrame == w then auditFrame = nil end
+    end)
+
+    local scroll = AceGUI:Create("ScrollFrame")
+    scroll:SetLayout("List")
+    auditFrame:AddChild(scroll)
+
+    local info = ns.Compliance and ns.Compliance.roster and ns.Compliance.roster[playerName]
+    if not info then
+        addNoteInline(scroll, "No current report for this member (they may have logged off or been cleared).")
+        return
+    end
+
+    local money = AceGUI:Create("Label")
+    money:SetFullWidth(true)
+    money:SetText("|cffffd100Gold moved:|r " .. fmtAuditMoney(info.wealthMoney))
+    scroll:AddChild(money)
+
+    local count = info.wealthItems or 0
+    local hdr = AceGUI:Create("Label")
+    hdr:SetFullWidth(true)
+    hdr:SetText(string.format("\n|cffffd100Items gained while addon off: %d|r", count))
+    scroll:AddChild(hdr)
+
+    local log = info.wealthLog or {}
+    if #log == 0 then
+        addNoteInline(scroll, (count > 0)
+            and "|cff808080The specific item IDs weren't included in the report.|r"
+            or  "|cff808080No items reported.|r")
+    else
+        local anyUncached = false
+        for _, id in ipairs(log) do
+            local name, link, _, _, _, _, _, _, _, tex = GetItemInfo(id)
+            if not link then anyUncached = true end
+            local row = AceGUI:Create("InteractiveLabel")
+            row:SetFullWidth(true)
+            row:SetText(link or string.format("|cffffffffItem #%s (loading…)|r", tostring(id)))
+            if tex then row:SetImage(tex) end
+            row:SetCallback("OnEnter", function(widget)
+                GameTooltip:SetOwner(widget.frame, "ANCHOR_RIGHT")
+                GameTooltip:SetHyperlink("item:" .. tostring(id))
+                GameTooltip:Show()
+            end)
+            row:SetCallback("OnLeave", function() GameTooltip:Hide() end)
+            scroll:AddChild(row)
+        end
+        if count > #log then
+            addNoteInline(scroll, string.format(
+                "|cff808080…and %d more item(s) not individually listed (the report caps the list).|r", count - #log))
+        end
+        -- Item names/textures resolve asynchronously; rebuild once if any weren't cached.
+        if anyUncached and not isRetry and C_Timer and C_Timer.After then
+            C_Timer.After(0.6, function()
+                if auditFrame and auditPlayer == playerName then ShowAudit(playerName, true) end
+            end)
+        end
+    end
+end
+
 -- A reported addon version for the "Ver" column. Peers on a pre-version build (or
 -- yet to report one) send nil / "0"; show a grey dash rather than a bogus "v0".
 local function versionCell(v)
@@ -79,9 +181,10 @@ local function addCell(grp, text, width, colorCode)
     grp:AddChild(lbl)
 end
 
--- Guild data row: labels + a Clear button (officer-only, only for a flagged
--- member) and a Kick button (officer-only) as the trailing columns.
-local function addGuildRow(parent, cells, colorCode, playerName, flagged)
+-- Guild data row: labels + an Audit button (officer or self, only when the member has
+-- reported off-radar wealth), a Clear button (officer-only, only for a flagged member),
+-- and a Kick button (officer-only) as the trailing columns.
+local function addGuildRow(parent, cells, colorCode, playerName, flagged, auditable)
     local isSelf   = (playerName == UnitName("player"))
     local officer  = Addon:IsOfficer()
     local canKick  = officer and not isSelf
@@ -90,6 +193,9 @@ local function addGuildRow(parent, cells, colorCode, playerName, flagged)
     -- stale flag is legitimate. OfficerClear only gates on the caller being an officer,
     -- and its clear/forgive syncs guild-wide for self exactly as for anyone else.
     local canClear = officer and flagged
+    -- Audit just reads data already broadcast to everyone; show it to officers (judging
+    -- any member) and to the member themselves (understanding their own flag).
+    local canAudit = auditable and (officer or isSelf)
 
     local grp = AceGUI:Create("SimpleGroup")
     grp:SetFullWidth(true)
@@ -98,9 +204,22 @@ local function addGuildRow(parent, cells, colorCode, playerName, flagged)
         addCell(grp, text, GUILD_COL_W[i], colorCode)
     end
 
-    -- The two trailing button columns are always the last two widths, so the data
+    -- The three trailing button columns are always the last three widths, so the data
     -- cells above can grow/shrink without re-indexing these.
-    local clearW, kickW = GUILD_COL_W[#GUILD_COL_W - 1], GUILD_COL_W[#GUILD_COL_W]
+    local auditW = GUILD_COL_W[#GUILD_COL_W - 2]
+    local clearW = GUILD_COL_W[#GUILD_COL_W - 1]
+    local kickW  = GUILD_COL_W[#GUILD_COL_W]
+
+    -- Audit column: a button when the member has reported off-radar wealth, else a spacer.
+    if canAudit then
+        local aud = AceGUI:Create("Button")
+        aud:SetRelativeWidth(auditW)
+        aud:SetText("Audit")
+        aud:SetCallback("OnClick", function() ShowAudit(playerName) end)
+        grp:AddChild(aud)
+    else
+        addCell(grp, "", auditW, colorCode)
+    end
 
     -- Clear column: an officer-only button on a flagged row, otherwise an empty
     -- spacer of the same width so every row's columns stay aligned.
@@ -166,7 +285,7 @@ local function BuildGuildRows(scroll)
     end
     local nOK = #list - nViol
 
-    addHeader(scroll, { "Player", "Lvl", "Phase", "Mode", "XP", "Ver", "Status", "", "" }, GUILD_COL_W)
+    addHeader(scroll, { "Player", "Lvl", "Phase", "Mode", "XP", "Ver", "Status", "", "", "" }, GUILD_COL_W)
 
     if #list > 0 then
         if nViol > 0 then
@@ -193,7 +312,8 @@ local function BuildGuildRows(scroll)
                 i.reasons or "OK",
             }, color, e.name, ns.Compliance and
                 (ns.Compliance:IsFlagged(e.name) or ns.Compliance:HasPlayedGap(e.name)
-                 or ns.Compliance:HasWealthGap(e.name)))
+                 or ns.Compliance:HasWealthGap(e.name)),
+                ns.Compliance and ns.Compliance:HasWealthGap(e.name))
         end
     end
 
@@ -484,8 +604,16 @@ function ns.ToggleRoster()
     frame = AceGUI:Create("Frame")
     frame:SetTitle("SoD Phase Lock — Compliance")
     frame:SetLayout("Fill")
-    frame:SetWidth(620)
+    frame:SetWidth(820)
     frame:SetHeight(440)
+    -- Non-resizable on purpose. Our rows are Flow-layout Labels whose height
+    -- depends on width (long, color-coded status text wraps), so a live
+    -- drag-resize drives the AceGUI ScrollFrame into a scrollbar show/hide
+    -- oscillation: each toggle shifts content.width by 20px, re-wraps every row,
+    -- re-runs DoLayout, and re-fires OnSizeChanged — a per-frame relayout loop
+    -- that freezes/crashes the client. Hiding the sizer handles removes the
+    -- vector entirely; the fixed 820×440 window scrolls its content instead.
+    frame:EnableResize(false)
     frame:SetCallback("OnClose", function(widget)
         if ns.GroupInspect then ns.GroupInspect:SetActive(false) end
         AceGUI:Release(widget)

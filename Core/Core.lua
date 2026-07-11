@@ -258,6 +258,14 @@ function Addon:OnGuildChanged()
     if enforcement then enforcement:FullScan() end
     local comm = self:GetModule("Comm", true)
     if comm and comm.RequestSync then comm:RequestSync() end
+    -- Re-ping with the corrected guild context and rebuild the roster NOW, rather than
+    -- waiting for the next scheduled status tick. Right after a login/reload GetGuildInfo
+    -- is often nil for a few seconds, so OnEnable cached a guildless "" bucket where Guild
+    -- Found reads as off; any status ping in that window derived no wealth/GF reason. Once
+    -- the real guild resolves here, push a fresh ping so those flags reappear immediately
+    -- instead of a full status interval (60-300s) later.
+    if comm and comm.SendStatus then comm:SendStatus() end
+    if ns.RefreshRoster then ns.RefreshRoster() end
 end
 
 function Addon:GetRuleset()       return self.db.global.rulesets[self:GuildKey()] end
@@ -316,6 +324,39 @@ function Addon:WealthIntegrityOn()
     return self:GuildFoundAny() and (self:GetRuleset().guildFound.integrity ~= false)
 end
 
+-- Adopt an authoritative guildFound table into our active ruleset bucket. Shared by
+-- ApplyRuleset (normal apply) and Comm's equal-epoch reconcile (a member parked at
+-- the current epoch with stale/default Guild Found — an old-client relay that stripped
+-- `gf`, or a login/bucket race — which ApplyRuleset's epoch gate can never correct).
+-- Returns true if any field actually changed, so callers can skip refresh churn.
+function Addon:ReconcileGuildFound(gf)
+    if type(gf) ~= "table" then return false end
+    local dst = self:GetRuleset().guildFound
+    local changed = false
+    local function setBool(k, v)
+        v = v and true or false
+        if dst[k] ~= v then dst[k] = v; changed = true end
+    end
+    setBool("trade",   gf.trade)
+    setBool("mail",    gf.mail)
+    setBool("auction", gf.auction)
+    setBool("allowConjured",    gf.allowConjured)
+    setBool("allowTradeWindow", gf.allowTradeWindow)
+    -- Wealth integrity (default on if absent, so an older officer's broadcast that
+    -- predates the field doesn't silently disable it on newer clients).
+    if gf.integrity ~= nil then setBool("integrity", gf.integrity) end
+    -- Trade allowlist: replace wholesale (a list of item IDs, not a boolean).
+    if type(gf.tradeExceptions) == "table" then
+        local ex, newset = dst.tradeExceptions, {}
+        for id in pairs(gf.tradeExceptions) do newset[tonumber(id) or id] = true end
+        for id in pairs(ex)     do if not newset[id] then changed = true end end
+        for id in pairs(newset) do if not ex[id]     then changed = true end end
+        for id in pairs(ex) do ex[id] = nil end
+        for id in pairs(newset) do ex[id] = true end
+    end
+    return changed
+end
+
 -- Apply a ruleset (from local officer action or an incoming broadcast).
 -- `enforce`, `autoUnequip` and `instanceGrace` are the guild-controlled
 -- enforcement config; they are only present on incoming broadcasts. For local
@@ -343,26 +384,7 @@ function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, ins
     if playedGapCheck ~= nil then r.playedGapCheck = playedGapCheck and true or false end
     if playedGapGrace ~= nil then r.playedGapGrace = playedGapGrace end
     if officerRankIndex ~= nil then r.officerRankIndex = officerRankIndex end
-    if guildFound then
-        r.guildFound.trade   = guildFound.trade   and true or false
-        r.guildFound.mail    = guildFound.mail    and true or false
-        r.guildFound.auction = guildFound.auction and true or false
-        r.guildFound.allowConjured = guildFound.allowConjured and true or false
-        r.guildFound.allowTradeWindow = guildFound.allowTradeWindow and true or false
-        -- Wealth integrity (default on if absent, so an older officer's broadcast that
-        -- predates the field doesn't silently disable it on newer clients).
-        if guildFound.integrity ~= nil then
-            r.guildFound.integrity = guildFound.integrity and true or false
-        end
-        -- Trade allowlist: replace wholesale (a list of item IDs, not a boolean).
-        if type(guildFound.tradeExceptions) == "table" then
-            local ex = r.guildFound.tradeExceptions
-            for id in pairs(ex) do ex[id] = nil end
-            for id in pairs(guildFound.tradeExceptions) do
-                ex[tonumber(id) or id] = true
-            end
-        end
-    end
+    if guildFound then self:ReconcileGuildFound(guildFound) end
 
     if not silent then
         local data = ns.Phases[r.phase]

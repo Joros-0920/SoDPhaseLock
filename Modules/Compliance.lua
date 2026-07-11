@@ -17,6 +17,14 @@ local function staleAfter()
     return (ns.Comm and ns.Comm.StaleAfter and ns.Comm:StaleAfter()) or 300
 end
 
+-- How long a Guild Found gf mismatch must PERSIST at our epoch before we set the
+-- "disabled locally" flag. A freshly-logged-in member can briefly report stale/default
+-- Guild Found until the equal-epoch reconcile (Comm's "R" handler) corrects them on
+-- their REQ->R answer; this grace lets an honest-but-converging member self-correct
+-- without ever flashing flagged. A genuine SavedVars opt-out keeps mismatching and is
+-- flagged once the grace elapses.
+local GF_MISMATCH_GRACE = 120
+
 -- Compact human duration for the played-without-addon reason ("2.4h" / "45m").
 local function fmtDuration(seconds)
     seconds = seconds or 0
@@ -235,9 +243,21 @@ function Compliance:Record(sender, data)
             for _ in pairs(mine.tradeExceptions) do myCount = myCount + 1 end
             if data.gfxn ~= myCount then overridden = true end
         end
+        -- Grace before accusing: hold off on the flag until the mismatch has PERSISTED
+        -- past GF_MISMATCH_GRACE (transient per-session state), so a member converging
+        -- via the equal-epoch reconcile is never briefly flagged. A real opt-out keeps
+        -- mismatching and trips it after the grace.
+        self._gfMismatchSince = self._gfMismatchSince or {}
+        local mk = flagKey(name)
         if overridden then
-            self:SetGFFlag(name)
+            local since = self._gfMismatchSince[mk]
+            if not since then
+                self._gfMismatchSince[mk] = GetTime()
+            elseif (GetTime() - since) >= GF_MISMATCH_GRACE then
+                self:SetGFFlag(name)
+            end
         else
+            self._gfMismatchSince[mk] = nil
             self:ClearGFFlagAuto(name)   -- in sync at our epoch → lift any stale flag
         end
     end
@@ -250,7 +270,10 @@ function Compliance:Record(sender, data)
 
     -- A persisted Guild Found flag holds the member out of compliance even when
     -- this ping is clean (they toggled the addon back on) — only an officer clears it.
-    if self:IsGFFlagged(name) then
+    -- Guarded on GuildFoundAny(): if the guild has NO Guild Found restriction active,
+    -- "disabled locally" is meaningless, so a stale flag (e.g. left on an offline member
+    -- after an officer turned Guild Found off) is never surfaced.
+    if self:IsGFFlagged(name) and Addon:GuildFoundAny() then
         reasons[#reasons + 1] = "Guild Found disabled locally"
     end
 

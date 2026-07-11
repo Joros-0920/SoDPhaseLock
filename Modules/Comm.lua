@@ -346,7 +346,7 @@ function Comm:OnComm(prefix, message, distribution, sender)
         -- to them. The officer who made the change still sees their own local confirmation
         -- (printed on their client by ApplyRuleset / commitGuild).
         local beforeEpoch = Addon:GetRuleset().epoch
-        Addon:ApplyRuleset(data.phase, data.mode, data.epoch, data.by,
+        local applied = Addon:ApplyRuleset(data.phase, data.mode, data.epoch, data.by,
             data.enforce, data.auto, data.grace, data.npd, data.gf, data.pgc, data.pgg, data.orank, true)
         -- Mixed-version rollout: a pre-GuildFound client (≤0.6.x) relays the ruleset with
         -- NO `gf` payload, so ApplyRuleset can't touch our guildFound (it only writes it when
@@ -361,6 +361,25 @@ function Comm:OnComm(prefix, message, distribution, sender)
                 self.gfResyncTimer = nil
                 self:RequestSync()
             end, 1 + math.random() * REQ_SPREAD)
+        end
+        -- Equal-epoch Guild Found reconcile. ApplyRuleset rejects a ruleset at epoch <= ours,
+        -- so a member already PARKED at the current epoch with stale/default guildFound (the
+        -- rollout above, or a login/bucket race) can never be corrected by any later broadcast —
+        -- they mis-enforce locally forever AND permanently trip "Guild Found disabled locally"
+        -- (the self-heal can't fire, since they can never converge to a matching gf). This
+        -- authoritative broadcast (data.by already officer-validated above) is our chance: if it
+        -- carries a gf that differs from ours at our epoch, adopt just the Guild Found config and
+        -- re-ping so any officer's stale flag self-heals promptly. Reached on the next login's
+        -- REQ->R answer, so a parked member self-corrects without an officer touching anything.
+        if not applied and type(data.gf) == "table"
+           and data.epoch == Addon:GetRuleset().epoch
+           and Addon:ReconcileGuildFound(data.gf) then
+            local enforcement = Addon:GetModule("Enforcement", true)
+            if enforcement then enforcement:FullScan() end
+            if ns.RefreshOptions then ns.RefreshOptions() end
+            if ns.RefreshBagOverlays then ns.RefreshBagOverlays() end
+            if ns.RefreshTradeExceptions then ns.RefreshTradeExceptions() end
+            self:SendStatus()
         end
 
     elseif data.t == "REQ" then

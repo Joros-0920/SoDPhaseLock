@@ -142,14 +142,18 @@ function Integrity:ForceReady()
 end
 
 -- ---------------------------------------------------------------------------
--- Core algorithm — called once per login by Playtime:attributeLogin with the same
--- (gap, added) it used for the played-without-addon counter.
+-- Core algorithm — called once per login by Playtime:attributeLogin. `added` is the
+-- played-without-addon decision (180s tolerance); `wealthAdded` is the tighter wealth
+-- decision (WEALTH_TOLERANCE, ~45s) — a closed economy tolerates far less unmonitored
+-- play, and the wealth diff is crash-safe (see Playtime's WEALTH_TOLERANCE note), so we
+-- fold on the shorter gap. Falls back to `added` if called by an older Playtime.
 -- ---------------------------------------------------------------------------
-function Integrity:OnLoginAttributed(gap, added)
+function Integrity:OnLoginAttributed(gap, added, wealthAdded)
     if self._ready then return end               -- only the first attribution matters
+    if wealthAdded == nil then wealthAdded = added end
     local w = wealth()
     local hadBaseline = (w.money ~= nil)          -- money/items are always snapshotted together
-    if added and hadBaseline and Addon:WealthIntegrityOn() then
+    if wealthAdded and hadBaseline and Addon:WealthIntegrityOn() then
         local curMoney = (GetMoney and GetMoney()) or 0
         local curItems = scanBags()
         -- Signed money delta across the gap. Net-cancelling equal/opposite moves is
