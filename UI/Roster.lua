@@ -5,8 +5,8 @@ local AceGUI = LibStub("AceGUI-3.0")
 local frame
 
 -- Relative column widths; each set must sum to ~1.0
--- Guild: Player | Lvl | Phase | Mode | XP | Status | (clear) | (kick)
-local GUILD_COL_W = { 0.20, 0.06, 0.07, 0.09, 0.08, 0.26, 0.12, 0.12 }
+-- Guild: Player | Lvl | Phase | Mode | XP | Ver | Status | (clear) | (kick)
+local GUILD_COL_W = { 0.19, 0.05, 0.06, 0.08, 0.07, 0.08, 0.23, 0.12, 0.12 }
 -- Group: Player | Lvl | Class | Range | Status
 local GROUP_COL_W = { 0.24, 0.07, 0.15, 0.16, 0.38 }
 
@@ -43,6 +43,13 @@ StaticPopupDialogs["SODPHASELOCK_GFCLEAR_CONFIRM"] = {
     hideOnEscape = true,
     preferredIndex = 3,
 }
+
+-- A reported addon version for the "Ver" column. Peers on a pre-version build (or
+-- yet to report one) send nil / "0"; show a grey dash rather than a bogus "v0".
+local function versionCell(v)
+    if not v or v == "0" or v == "" then return "|cff808080—|r" end
+    return "v" .. tostring(v)
+end
 
 -- Generic header row from a list of labels + matching relative widths.
 local function addHeader(parent, labels, widths)
@@ -91,22 +98,26 @@ local function addGuildRow(parent, cells, colorCode, playerName, flagged)
         addCell(grp, text, GUILD_COL_W[i], colorCode)
     end
 
+    -- The two trailing button columns are always the last two widths, so the data
+    -- cells above can grow/shrink without re-indexing these.
+    local clearW, kickW = GUILD_COL_W[#GUILD_COL_W - 1], GUILD_COL_W[#GUILD_COL_W]
+
     -- Clear column: an officer-only button on a flagged row, otherwise an empty
     -- spacer of the same width so every row's columns stay aligned.
     if canClear then
         local clr = AceGUI:Create("Button")
-        clr:SetRelativeWidth(GUILD_COL_W[7])
+        clr:SetRelativeWidth(clearW)
         clr:SetText("Clear")
         clr:SetCallback("OnClick", function()
             StaticPopup_Show("SODPHASELOCK_GFCLEAR_CONFIRM", playerName, nil, playerName)
         end)
         grp:AddChild(clr)
     else
-        addCell(grp, "", GUILD_COL_W[7], colorCode)
+        addCell(grp, "", clearW, colorCode)
     end
 
     local btn = AceGUI:Create("Button")
-    btn:SetRelativeWidth(GUILD_COL_W[8])
+    btn:SetRelativeWidth(kickW)
     btn:SetText("Kick")
     btn:SetDisabled(not canKick)
     if canKick then
@@ -155,7 +166,7 @@ local function BuildGuildRows(scroll)
     end
     local nOK = #list - nViol
 
-    addHeader(scroll, { "Player", "Lvl", "Phase", "Mode", "XP", "Status", "", "" }, GUILD_COL_W)
+    addHeader(scroll, { "Player", "Lvl", "Phase", "Mode", "XP", "Ver", "Status", "", "" }, GUILD_COL_W)
 
     if #list > 0 then
         if nViol > 0 then
@@ -178,6 +189,7 @@ local function BuildGuildRows(scroll)
                 "P" .. tostring(i.phase or "?"),
                 i.mode or "?",
                 i.xpLocked and "|cff40ff40Locked|r" or "|cff808080—|r",
+                versionCell(i.version),
                 i.reasons or "OK",
             }, color, e.name, ns.Compliance and
                 (ns.Compliance:IsFlagged(e.name) or ns.Compliance:HasPlayedGap(e.name)))
@@ -205,7 +217,7 @@ local function BuildGuildRows(scroll)
                 statusText = "|cffff8000Addon not detected|r"
             end
             addGuildRow(scroll, {
-                r.name, "—", "—", "—", "—", statusText,
+                r.name, "—", "—", "—", "—", "—", statusText,
             }, "|cffff8000", r.name, r.saved)
         end
     end
@@ -413,6 +425,7 @@ local function contentSignature()
             parts[#parts + 1] = table.concat({
                 e.name, tostring(i.level or "?"), tostring(i.phase or "?"),
                 tostring(i.mode or "?"), i.xpLocked and "1" or "0",
+                tostring(i.version or ""),
                 i.compliant and "1" or "0", i.reasons or "",
             }, "\1")
         end

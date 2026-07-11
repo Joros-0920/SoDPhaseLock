@@ -221,6 +221,7 @@ function Compliance:Record(sender, data)
         quest      = data.vQ or 0,
         rune       = data.vR == 1,
         xpLocked   = data.vX == 1,   -- informational; intentionally excluded from reasons/compliant
+        version    = data.v,         -- reporter's addon version, for the roster's version column
         unobserved = data.up or 0,   -- reported /played-with-addon-off seconds (drives the Clear/forgive button)
         compliant  = (#reasons == 0),
         reasons    = (#reasons == 0) and "OK" or table.concat(reasons, ", "),

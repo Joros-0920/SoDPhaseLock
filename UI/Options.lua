@@ -1788,6 +1788,16 @@ function ns.OpenOptions()
     local f = AceConfigDialog.OpenFrames[APP]
     if f and f.SetStatusText then
         f:SetStatusText("Made by Joros - Wild Growth")
+        -- Version on the right side of the status bar (created once, reused thereafter).
+        if f.statusbg and not f.sodVersionText then
+            local vt = f.statusbg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            vt:SetPoint("RIGHT", -7, 0)
+            vt:SetJustifyH("RIGHT")
+            f.sodVersionText = vt
+        end
+        if f.sodVersionText then
+            f.sodVersionText:SetText("v" .. (ns.Version or "?"))
+        end
     end
 end
 
