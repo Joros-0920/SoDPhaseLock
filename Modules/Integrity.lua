@@ -82,7 +82,16 @@ local function scanBank() return scanContainers(bankContainers()) end
 
 local function snapshotNow(w)
     w.money = (GetMoney and GetMoney()) or 0
-    w.items = scanBags()
+    -- Never overwrite a populated item baseline with an EMPTY scan. GetMoney() reads valid
+    -- the instant we log in, but the container API populates a few seconds later, so a scan
+    -- run before bags load returns {} even for a full inventory. Persisting that empty table
+    -- as the baseline turns the next gap-fold into a whole-inventory false flag (every item
+    -- reads as "gained" against an empty base). A genuinely-empty scan only establishes the
+    -- baseline when there isn't one yet.
+    local scanned = scanBags()
+    if next(scanned) ~= nil or w.items == nil or next(w.items) == nil then
+        w.items = scanned
+    end
 end
 
 -- Remember a gained itemID (set semantics, capped at LOG_CAP distinct entries).
@@ -131,13 +140,48 @@ function Integrity:OnEnable()
     self:RegisterEvent("PLAYERBANKSLOTS_CHANGED", "OnBankSlots")
     -- Safety net: if Playtime never attributes a login (e.g. the server never answers
     -- TIME_PLAYED), still take a baseline so steady-state tracking and the logout flush
-    -- work. Comfortably after Playtime's reconcile window closes.
-    self:ScheduleTimer("ForceReady", 30)
+    -- work. Comfortably after Playtime's ~8-11s reconcile window PLUS this module's own
+    -- ~6s item-fold retry (FoldItemsWhenReady) — both tightened 2026-07-11 — so 20s still
+    -- leaves a several-second margin over the worst normal case.
+    self:ScheduleTimer("ForceReady", 20)
 end
 
 function Integrity:ForceReady()
     if self._ready then return end
     snapshotNow(wealth())
+    self._ready = true
+end
+
+-- Bags can still be loading a few seconds into login. Retry the item compare instead of
+-- accepting a one-shot empty scan: if we gave up immediately and flipped `_ready` true, the
+-- very next BAG_UPDATE (steady-state tracking, once bags actually populate) would silently
+-- overwrite `w.items` with the POST-gap scan with no comparison ever happening — quietly
+-- swallowing a genuine gain. `_ready` stays false (holding off OnMoney/OnBagUpdate) until
+-- this resolves, so there's no window for steady-state tracking to race ahead of it.
+local BAG_RETRY_DELAY = 1
+local BAG_RETRY_MAX   = 6   -- ~6s of retrying; bags essentially never take this long to load
+
+function Integrity:FoldItemsWhenReady(attempt)
+    if self._ready then return end   -- ForceReady's 30s safety net already resolved us
+    local w = wealth()
+    local baseReady = w.items ~= nil and next(w.items) ~= nil
+    local curItems  = scanBags()
+    local curReady  = next(curItems) ~= nil
+    if baseReady and curReady then
+        w.unaccountedItems = (w.unaccountedItems or 0) + foldGains(w, w.items, curItems)
+        w.items = curItems
+        self._ready = true
+        if ns.Comm and ns.Comm.SendStatus then ns.Comm:SendStatus() end
+        return
+    end
+    if attempt < BAG_RETRY_MAX then
+        self:ScheduleTimer(function() self:FoldItemsWhenReady(attempt + 1) end, BAG_RETRY_DELAY)
+        return
+    end
+    -- Gave up: bags never populated (or there was genuinely no prior baseline to compare
+    -- against). Take whatever we have now as the baseline so steady-state tracking can begin;
+    -- this login's gap simply can't be folded (conservative — a missed gain beats a false flag).
+    if curReady then w.items = curItems end
     self._ready = true
 end
 
@@ -155,18 +199,19 @@ function Integrity:OnLoginAttributed(gap, added, wealthAdded)
     local hadBaseline = (w.money ~= nil)          -- money/items are always snapshotted together
     if wealthAdded and hadBaseline and Addon:WealthIntegrityOn() then
         local curMoney = (GetMoney and GetMoney()) or 0
-        local curItems = scanBags()
         -- Signed money delta across the gap. Net-cancelling equal/opposite moves is
-        -- acceptable — a closed economy cares that wealth reconciles, not the path.
+        -- acceptable — a closed economy cares that wealth reconciles, not the path. Money
+        -- reads valid immediately at login, so this folds right away (no retry needed).
         w.unaccountedMoney = (w.unaccountedMoney or 0) + (curMoney - w.money)
+        w.money = curMoney
         -- Bag items that appeared while unmonitored. (An off-radar item parked in the bank
         -- isn't visible here — the bank frame is closed at login — so it's caught later by
-        -- the bank-open compare instead.)
-        w.unaccountedItems = (w.unaccountedItems or 0) + foldGains(w, w.items, curItems)
-        w.money, w.items = curMoney, curItems
-        self._ready = true
+        -- the bank-open compare instead.) The container API can lag login by a few seconds,
+        -- so this is retried rather than compared once — see FoldItemsWhenReady.
+        self:FoldItemsWhenReady(0)
         -- Flip the member's roster row now rather than waiting a full StatusInterval,
-        -- exactly as Playtime does after attributing a played gap.
+        -- exactly as Playtime does after attributing a played gap. (Item count may still be
+        -- settling via the retry above; the money change alone is enough to surface a reason.)
         if ns.Comm and ns.Comm.SendStatus then ns.Comm:SendStatus() end
     else
         -- No gap, integrity off, or first-ever snapshot (nothing to compare): just
@@ -221,14 +266,20 @@ function Integrity:BankScanCompare()
     -- first bank observation just establishes the reference. No /played-gap gating is
     -- needed — the bank only changes while open, so any difference from the last monitored
     -- bank state necessarily happened while the bank was open but unmonitored (addon off).
-    if w.bankItems ~= nil and Addon:WealthIntegrityOn() then
+    -- Only fold against a POPULATED prior bank baseline, and only when this scan is
+    -- populated too — bank container data lands a moment after the frame opens, so an
+    -- early empty scan must not become the baseline (it would flag the whole bank on the
+    -- next open) nor be diffed as a total loss/gain. Same guard as the bag path above.
+    local baseReady = w.bankItems ~= nil and next(w.bankItems) ~= nil
+    local curReady  = next(cur) ~= nil
+    if baseReady and curReady and Addon:WealthIntegrityOn() then
         local gained = foldGains(w, w.bankItems, cur)
         if gained > 0 then
             w.unaccountedItems = (w.unaccountedItems or 0) + gained
             if ns.Comm and ns.Comm.SendStatus then ns.Comm:SendStatus() end
         end
     end
-    w.bankItems = cur
+    if curReady then w.bankItems = cur end
     self._bankCompared = true
 end
 

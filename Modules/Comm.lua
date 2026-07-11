@@ -50,6 +50,12 @@ local TARGET_CPS     = 4      -- target guild-wide status msgs/sec (interval = o
 local REQ_SPREAD     = 6      -- window (s) a queued REQ reply is jittered across
 local REQ_SUPPRESS   = 8      -- don't re-answer a REQ within this long of the last ruleset seen/sent
 local PWA_SUPPRESS   = 8      -- don't re-answer a played-witness query if one was seen this recently
+-- A "PWA" reply is keyed per queried player (gossip-suppressed like REQ), but unlike REQ the
+-- collision risk is tiny — bounded by how many of THAT player's alts happen to be online, not
+-- the whole guild — so it doesn't need REQ_SPREAD's wide window. A tighter spread lets
+-- Playtime/Integrity close their login reconciliation window sooner (see RECONCILE_WINDOW in
+-- Modules/Playtime.lua, which this must stay comfortably ahead of).
+local PWA_SPREAD     = 2
 
 -- ---------------------------------------------------------------------------
 local function pack(tbl)
@@ -71,6 +77,24 @@ end
 local function send(tbl)
     if not IsInGuild() then return end
     Comm:SendCommMessage(PREFIX, pack(tbl), "GUILD")
+end
+
+-- Officer-triggered broadcasts (R, GFC, PGF, WGF) are rare, high-value, and — unlike the
+-- status ping — have no next-tick to self-heal a single lost copy: a member can be stuck
+-- flagged, out-of-sync, or unforgiven indefinitely if the one send never lands. AceComm
+-- paces guild-channel traffic through ChatThrottleLib rather than dropping it outright, but
+-- a queued send can still be lost if it's still in-flight across a relog/disconnect, or
+-- simply arrive so late (behind a login-storm burst) that it reads as "stuck." Resend a
+-- couple of staggered copies so one landing is enough; every receive path for these four
+-- message types is idempotent (re-applying an already-applied clear/forgive/ruleset is a
+-- no-op), so duplicates cost nothing but a little extra traffic on an already-rare event.
+local RESEND_DELAYS = { 2, 5 }
+
+local function sendReliable(tbl)
+    send(tbl)
+    for _, delay in ipairs(RESEND_DELAYS) do
+        Comm:ScheduleTimer(function() send(tbl) end, delay)
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -172,14 +196,21 @@ function Comm:OnEnable()
     -- mass-login REQ burst), then start status pings.
     self:ScheduleTimer("RequestSync", 2 + math.random() * 6)
     -- Ask the guild for our own witnessed-/played high-water so an alternate PC adopts
-    -- it before Playtime attributes any login gap (see Modules/Playtime.lua). Jittered
-    -- like REQ, and well inside Playtime's reconciliation window.
-    self:ScheduleTimer("RequestPlayedWitness", 2 + math.random() * 6)
-    -- Retry once if nobody answered the first REQ (e.g. guild leader offline,
-    -- other members still loading). Only fires when epoch is still 0, so it is
-    -- free for anyone who already synced.
+    -- it before Playtime attributes any login gap (see Modules/Playtime.lua). Sent sooner
+    -- than the REQ above (tighter jitter, less collision risk — see PWA_SPREAD) so the
+    -- whole query/reply round trip finishes with room inside Playtime's reconciliation window.
+    self:ScheduleTimer("RequestPlayedWitness", 1 + math.random() * 3)
+    -- Retry once if nobody answered the first REQ (e.g. guild leader offline, other
+    -- members still loading, or the REQ/reply just got lost in a login-storm queue).
+    -- Gate on lastRulesetSeen rather than epoch == 0: a RETURNING member already holds a
+    -- stale nonzero epoch from a prior session, and epoch == 0 alone would never catch a
+    -- dropped REQ/reply for them — they'd be stuck waiting on some peer's status ping to
+    -- reveal they're behind (MaybeResync), which may be a full StatusInterval away, or
+    -- longer still if no synced peer happens to be online yet. lastRulesetSeen is set by
+    -- either an authoritative "R" received this session or one we sent ourselves, so it's
+    -- a true "have we heard from the guild yet this session" signal for anyone.
     self:ScheduleTimer(function()
-        if Addon:GetRuleset().epoch == 0 then self:RequestSync() end
+        if not self.lastRulesetSeen then self:RequestSync() end
     end, 25 + math.random() * 20)
     -- First status shortly after login (jittered), then self-reschedule.
     self:ScheduleTimer("StatusTick", 6 + math.random() * 8)
@@ -214,7 +245,7 @@ function Comm:BroadcastRuleset()
     -- Mark that the guild just heard an authoritative ruleset, so we suppress
     -- any REQ replies for a beat (REQ_SUPPRESS) instead of piling on.
     self.lastRulesetSeen = GetTime()
-    send(rulesetPayload())
+    sendReliable(rulesetPayload())
 end
 
 -- Number of item IDs on our local trade allowlist. Members synced to the same
@@ -269,7 +300,7 @@ end
 -- name (`by`) for authority validation on receipt — same trust model as "R".
 function Comm:BroadcastGFClear(player)
     if not player or player == "" then return end
-    send({ t = "GFC", player = player, by = UnitName("player"), v = VERSION })
+    sendReliable({ t = "GFC", player = player, by = UnitName("player"), v = VERSION })
 end
 
 -- An officer forgave a member's played-without-addon gap. Broadcast guild-wide so it
@@ -277,7 +308,7 @@ end
 -- Carries the officer's name (`by`) for authority validation on receipt, like "GFC".
 function Comm:BroadcastPlayedForgive(player)
     if not player or player == "" then return end
-    send({ t = "PGF", player = player, by = UnitName("player"), v = VERSION })
+    sendReliable({ t = "PGF", player = player, by = UnitName("player"), v = VERSION })
 end
 
 -- An officer forgave a member's Guild Found wealth-integrity discrepancy. Broadcast
@@ -286,7 +317,7 @@ end
 -- receipt, exactly like "PGF".
 function Comm:BroadcastWealthForgive(player)
     if not player or player == "" then return end
-    send({ t = "WGF", player = player, by = UnitName("player"), v = VERSION })
+    sendReliable({ t = "WGF", player = player, by = UnitName("player"), v = VERSION })
 end
 
 -- Ask the guild what /played high-water it has witnessed for US, so an alternate PC
@@ -435,8 +466,8 @@ function Comm:OnComm(prefix, message, distribution, sender)
         -- them, so a fresh/alternate PC of theirs can adopt it instead of false-flagging
         -- honest multi-PC play. Reconciliation can only ever RAISE their baseline (never
         -- accuse), so relaying is safe. Answer with a single jittered, gossip-suppressed
-        -- reply keyed per player (mirrors the REQ gossip pattern) so a mass login doesn't
-        -- draw O(N) replies each.
+        -- reply keyed per player (mirrors the REQ gossip pattern, but tighter — see
+        -- PWA_SPREAD) so a mass login doesn't draw O(N) replies each.
         if sender == me then return end
         local who = data.who
         if not who or not ns.Compliance then return end
@@ -455,7 +486,7 @@ function Comm:OnComm(prefix, message, distribution, sender)
             if cur and cur > 0 then
                 send({ t = "PWA", who = who, ob = math.floor(cur), v = VERSION })
             end
-        end, math.random() * REQ_SPREAD)
+        end, math.random() * PWA_SPREAD)
 
     elseif data.t == "PWA" then
         -- Answer to a played-witness query. Note the sighting so other peers suppress

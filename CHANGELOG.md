@@ -4,6 +4,21 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.3] - 2026-07-11
+
+### Added
+- **New `/sodlock wealth` diagnostic command.** Prints whether Guild Found is active, whether the leader's "Flag off-radar gold/items" toggle is on, whether this session's baseline has been established yet, and the current money/item baseline sizes plus what's been reported so far — for troubleshooting why a gold/item change was or wasn't flagged.
+
+### Changed
+- **The Guild Found wealth-integrity baseline now settles roughly twice as fast after login** (previously ~15-20 seconds, now ~8-11 seconds in the common case), by tightening the cross-PC reconciliation window and its message jitter. No change to correctness — an honest alternate-PC player is still safely reconciled first.
+
+### Fixed
+- **A slow bag-load no longer silently drops a genuine off-radar item gain.** Previously, if your bags hadn't finished loading by the moment the addon compared them, that comparison was skipped once and the next bag update quietly adopted the new (post-trade) contents as the baseline — with no record the gain ever happened. It now retries for a few seconds until bags are actually populated before giving up.
+- **Reduced the chance of members getting stuck in a stale state (e.g. "Guild Found disabled locally") due to a lost sync message.** Ruleset broadcasts and officer actions (Clear, played-gap forgive, wealth-gap forgive) were each sent exactly once with no retry — if that single message got lost in guild-channel congestion (e.g. a mass-login moment), the affected member could stay stuck until an unrelated event happened to re-sync them. These messages are now resent a couple of times over the following few seconds so a single lost copy doesn't strand anyone; receiving the same message twice is harmless (it just re-confirms the same state).
+- **A returning member whose very first sync request went unanswered could get stuck out-of-date indefinitely**, since the old retry logic only re-asked if they had *never* synced at all in this addon's lifetime — not if they already had an old phase/settings from a previous session. Now any member who hasn't heard back from the guild yet this session retries automatically, closing that gap.
+
+---
+
 ## [0.7.2] - 2026-07-11
 
 ### Added

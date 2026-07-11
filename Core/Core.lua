@@ -545,6 +545,38 @@ function Addon:HandleSlash(input)
         else
             self:Print("  Baganator: not detected (using default Blizzard bag overlay)")
         end
+    elseif input == "wealth" then
+        -- Explain whether the Guild Found wealth-integrity check (Modules/Integrity.lua)
+        -- is actually evaluating for this character right now, and what it currently holds
+        -- — the "why didn't a trade get flagged" question has several independent gates
+        -- (Guild Found active, the leader's integrity toggle, and whether a baseline has
+        -- been established this session), none of which were visible anywhere before.
+        local r = self:GetRuleset()
+        local gf = r.guildFound
+        self:Print("|cffffd100Guild Found wealth-integrity diagnostics:|r")
+        self:Print(string.format("  Guild Found active: %s  (trade:%s mail:%s auction:%s)",
+            self:GuildFoundAny() and "|cff00ff00yes|r" or "|cffff3030no|r",
+            gf.trade and "on" or "off", gf.mail and "on" or "off", gf.auction and "on" or "off"))
+        self:Print(string.format("  \"Flag off-radar gold/items\" (leader toggle): %s",
+            (gf.integrity ~= false) and "|cff00ff00on|r" or "|cffff3030off|r"))
+        self:Print(string.format("  wealth integrity evaluated: %s  (needs both of the above)",
+            self:WealthIntegrityOn() and "|cff00ff00yes|r" or "|cffff3030no|r"))
+        local integrity = self:GetModule("Integrity", true)
+        local w = self.db.char.wealth or {}
+        local itemCount, bankCount = 0, 0
+        if w.items then for _ in pairs(w.items) do itemCount = itemCount + 1 end end
+        if w.bankItems then for _ in pairs(w.bankItems) do bankCount = bankCount + 1 end end
+        self:Print(string.format("  session baseline established: %s  (money:%s items:%d distinct, bank:%d distinct)",
+            (integrity and integrity._ready) and "|cff00ff00yes|r" or "|cffff3030not yet|r",
+            w.money and GetCoinTextureString(w.money) or "—", itemCount, bankCount))
+        local money = integrity and integrity:GetUnaccountedMoney() or 0
+        local items = integrity and integrity:GetUnaccountedItems() or 0
+        self:Print(string.format("  reported so far: %+dc, %d distinct item(s) gained while off",
+            money, items))
+        local log = integrity and integrity:GetItemLog()
+        if log then
+            self:Print("  logged item IDs: " .. table.concat(log, ", "))
+        end
     else
         if ns.OpenOptions then ns.OpenOptions() end
     end

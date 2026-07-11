@@ -36,7 +36,11 @@ local WEALTH_TOLERANCE = 5
 -- "PWQ" a few seconds in) before attributing any cross-session gap. Must comfortably
 -- exceed Comm's PWQ send + reply jitter so an honest alternate PC adopts its shared
 -- witness value first. The /played request is issued only once this window closes.
-local RECONCILE_WINDOW = 15
+-- Comm's worst case (PWQ sent by 4s + PWA_SPREAD's 2s reply jitter) is ~6s, so 8s
+-- (+ up to 3s of its own jitter below) leaves a comfortable margin while keeping this
+-- — and the wealth-integrity baseline that rides on it — noticeably faster to settle
+-- than the previous 15-19s window.
+local RECONCILE_WINDOW = 8
 
 -- Session-only anchors (NEVER persisted). GetTime() is seconds since the client
 -- process started and RESETS on a full client restart, so it is not comparable across
@@ -125,10 +129,10 @@ function Playtime:OnEnable()
     self:RegisterEvent("PLAYER_LOGOUT", "AdvanceObserved")
     self._reconcileDone = false
     -- Hold cross-session attribution until the guild has had a chance to answer our
-    -- high-water query (Comm sends "PWQ" ~2-8s in); the /played read is issued when the
+    -- high-water query (Comm sends "PWQ" ~1-4s in); the /played read is issued when the
     -- window closes. One server read per session catches the gap; during the session we
     -- self-account with GetTime (see AdvanceObserved), so no further polling is needed.
-    self:ScheduleTimer("FinishReconcile", RECONCILE_WINDOW + math.random() * 4)
+    self:ScheduleTimer("FinishReconcile", RECONCILE_WINDOW + math.random() * 3)
     -- Keep `observed` current so a crash loses at most ADVANCE_INTERVAL of it.
     self.advanceTimer = self:ScheduleRepeatingTimer("AdvanceObserved", ADVANCE_INTERVAL)
 end
