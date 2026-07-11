@@ -68,10 +68,9 @@ local defaults = {
                     -- closed-economy blind spot when a member disables the addon, moves
                     -- value with an outsider, and re-enables it. Auto-active whenever any
                     -- restriction above is on; `integrity` lets a guild leader opt out.
-                    -- `wealthGrace` = gold a net cross-gap money change may reach before
-                    -- it counts (items always count). See Modules/Integrity.lua.
-                    integrity   = true,
-                    wealthGrace = 10,
+                    -- No tolerance: in a closed economy no play without the addon is
+                    -- acceptable, so ANY change flags. See Modules/Integrity.lua.
+                    integrity = true,
                     -- Trade allowlist: item IDs that MAY be traded cross-guild even
                     -- when `trade` is on. If non-empty, a cross-guild trade is allowed
                     -- as long as it contains only these items and no gold. Keyed by
@@ -315,14 +314,6 @@ function Addon:WealthIntegrityOn()
     return self:GuildFoundAny() and (self:GetRuleset().guildFound.integrity ~= false)
 end
 
--- Threshold in COPPER a net cross-gap money change must reach to count (0 = off).
--- Reads the synced ruleset so every client evaluates a member's report against the
--- same guild-leader-set tolerance. Items always count regardless of this.
-function Addon:WealthGraceCopper()
-    local g = self:GetRuleset().guildFound.wealthGrace or 10
-    return (g > 0) and (g * 10000) or 0
-end
-
 -- Apply a ruleset (from local officer action or an incoming broadcast).
 -- `enforce`, `autoUnequip` and `instanceGrace` are the guild-controlled
 -- enforcement config; they are only present on incoming broadcasts. For local
@@ -361,7 +352,6 @@ function Addon:ApplyRuleset(phase, mode, epoch, setBy, enforce, autoUnequip, ins
         if guildFound.integrity ~= nil then
             r.guildFound.integrity = guildFound.integrity and true or false
         end
-        if guildFound.wealthGrace ~= nil then r.guildFound.wealthGrace = guildFound.wealthGrace end
         -- Trade allowlist: replace wholesale (a list of item IDs, not a boolean).
         if type(guildFound.tradeExceptions) == "table" then
             local ex = r.guildFound.tradeExceptions

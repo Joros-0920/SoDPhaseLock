@@ -195,12 +195,11 @@ function Compliance:Record(sender, data)
     -- addon was unloaded (see Modules/Integrity.lua). Evaluated only when Guild Found is
     -- active in OUR ruleset (open economy ⇒ nothing to reconcile); a member who hasn't
     -- synced never accumulated (their own Guild Found was off), so they report zero and
-    -- can't be false-flagged. Items always count; the money side uses the synced gold
-    -- threshold. Durable like the played gap — reported every ping until an officer
-    -- forgives it — so no saved flag is needed.
+    -- can't be false-flagged. No tolerance — in a closed economy no play without the addon
+    -- is acceptable, so ANY change flags. Durable like the played gap — reported every ping
+    -- until an officer forgives it — so no saved flag is needed.
     if Addon:WealthIntegrityOn() then
-        local grace    = Addon:WealthGraceCopper()
-        local moneyHit = grace > 0 and math.abs(data.wm or 0) >= grace
+        local moneyHit = (data.wm or 0) ~= 0
         local itemHit  = (data.wq or 0) > 0
         if moneyHit or itemHit then
             local parts = {}
@@ -324,9 +323,7 @@ function Compliance:HasWealthGap(name)
     if not Addon:WealthIntegrityOn() then return false end
     local info = self.roster[rosterKey(self, name)]
     if not info then return false end
-    local grace = Addon:WealthGraceCopper()
-    local moneyHit = grace > 0 and math.abs(info.wealthMoney or 0) >= grace
-    return moneyHit or (info.wealthItems or 0) > 0
+    return (info.wealthMoney or 0) ~= 0 or (info.wealthItems or 0) > 0
 end
 
 -- Officer action: clear everything an officer can dismiss for a member — the saved

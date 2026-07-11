@@ -4,6 +4,20 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.1] - 2026-07-11
+
+### Added
+- **Catch gold and items that move while the addon is off (Guild Found).** Guild Found keeps a closed economy — no gold or items in or out from outside the guild — but those trade/mail/Auction House blocks only work while the addon is running. Someone could turn the addon off, receive 500g or a bag of items from an outsider (or mail gold *out* to one), and turn it back on with nothing to show for it. Now the addon keeps a private snapshot of your gold and bag contents, and the next time you log in after having played with the addon **disabled**, it compares against that snapshot and reports **any** gold or items that changed while it wasn't watching — flagging the member for officer review (e.g. "Guild Found: +340g, 12 item(s) while addon off"). There is no tolerance: in a closed economy no play without the addon is acceptable, so any change at all is surfaced. This piggybacks on the existing played-without-addon detection, so it only ever triggers for a member who actually played with the addon off.
+- **A guild-leader toggle** (Guild Settings → **Guild Found** → **"Flag off-radar gold/items"**, on by default whenever any Guild Found restriction is active) turns the check on or off for the whole guild.
+- **Officers clear it with the same "Clear" button** (or `/sodlock clearflag <player>`) that already clears the other integrity flags — it resets the member's counter guild-wide, and the flag only returns if *new* gold or items move while the addon is off again.
+
+### Notes
+- Officers judge the source: the addon can only report that value moved while it wasn't watching, not whether it came from a legitimate source (mob loot, quest gold) or a Guild Found breach. It's a review signal, not proof.
+- Bags only — bank contents can't be read unless the bank window is open, so they aren't tracked.
+- Best-effort, like every integrity signal: a modified addon can still forge it. It closes the "turn the addon off, move value, turn it back on" loophole for the lazy case, not a determined one.
+
+---
+
 ## [0.7.0] - 2026-07-09
 
 ### Added
