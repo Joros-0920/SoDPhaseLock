@@ -34,13 +34,13 @@ end
 -- older ones) — same defensive pattern as Enforcement.lua / UI/BagOverlay.lua.
 -- ---------------------------------------------------------------------------
 local CC = C_Container
-local function scanBags()
+local function scanContainers(bags)
     local counts = {}
     local getSlots = (CC and CC.GetContainerNumSlots) or GetContainerNumSlots
     local getID    = (CC and CC.GetContainerItemID)   or GetContainerItemID
     local getInfo  = (CC and CC.GetContainerItemInfo) or GetContainerItemInfo
     if not getSlots or not getID then return counts end
-    for bag = 0, (NUM_BAG_SLOTS or 4) do
+    for _, bag in ipairs(bags) do
         local n = getSlots(bag) or 0
         for s = 1, n do
             local id = getID(bag, s)
@@ -61,6 +61,25 @@ local function scanBags()
     return counts
 end
 
+-- Carried bags: backpack (0) + equipped bags (1..NUM_BAG_SLOTS). Always readable.
+local function bagContainers()
+    local t = {}
+    for b = 0, (NUM_BAG_SLOTS or 4) do t[#t + 1] = b end
+    return t
+end
+
+-- Bank: the main bank container plus its purchased bag slots. Only readable while the
+-- bank frame is open (BANKFRAME_OPENED..BANKFRAME_CLOSED); scanned only in that window.
+local function bankContainers()
+    local t = { BANK_CONTAINER or -1 }
+    local first = (NUM_BAG_SLOTS or 4) + 1
+    for b = first, first + (NUM_BANKBAGSLOTS or 7) - 1 do t[#t + 1] = b end
+    return t
+end
+
+local function scanBags() return scanContainers(bagContainers()) end
+local function scanBank() return scanContainers(bankContainers()) end
+
 local function snapshotNow(w)
     w.money = (GetMoney and GetMoney()) or 0
     w.items = scanBags()
@@ -77,6 +96,20 @@ local function addToLog(w, id)
     log[id] = true
 end
 
+-- Count distinct itemIDs whose count in `cur` exceeds `base` (items that appeared while
+-- unmonitored), logging each. Items appearing is the closed-economy concern; consumption/
+-- vendoring dominates the removal side, so only gains count.
+local function foldGains(w, base, cur)
+    local gained = 0
+    for id, cnt in pairs(cur) do
+        if cnt > ((base and base[id]) or 0) then
+            gained = gained + 1
+            addToLog(w, id)
+        end
+    end
+    return gained
+end
+
 -- ---------------------------------------------------------------------------
 -- Lifecycle
 -- ---------------------------------------------------------------------------
@@ -89,6 +122,13 @@ function Integrity:OnEnable()
     self:RegisterEvent("PLAYER_MONEY", "OnMoney")
     self:RegisterEvent("BAG_UPDATE", "OnBagUpdate")
     self:RegisterEvent("PLAYER_LOGOUT", "Flush")
+    -- Bank: only observable while its frame is open, so it's tracked as a separate
+    -- baseline sampled during bank sessions (see OnBankOpened). An item parked in the
+    -- bank while the addon was off wouldn't show in bags at login — it's caught the next
+    -- time the bank is opened with the addon on.
+    self:RegisterEvent("BANKFRAME_OPENED", "OnBankOpened")
+    self:RegisterEvent("BANKFRAME_CLOSED", "OnBankClosed")
+    self:RegisterEvent("PLAYERBANKSLOTS_CHANGED", "OnBankSlots")
     -- Safety net: if Playtime never attributes a login (e.g. the server never answers
     -- TIME_PLAYED), still take a baseline so steady-state tracking and the logout flush
     -- work. Comfortably after Playtime's reconcile window closes.
@@ -115,17 +155,10 @@ function Integrity:OnLoginAttributed(gap, added)
         -- Signed money delta across the gap. Net-cancelling equal/opposite moves is
         -- acceptable — a closed economy cares that wealth reconciles, not the path.
         w.unaccountedMoney = (w.unaccountedMoney or 0) + (curMoney - w.money)
-        -- Distinct itemIDs whose count rose while unmonitored (items appearing is the
-        -- closed-economy concern; consumption/vendoring dominates the removal side, so
-        -- only gains count — see the plan's scoping rationale).
-        local base, gained = w.items or {}, 0
-        for id, cnt in pairs(curItems) do
-            if cnt > (base[id] or 0) then
-                gained = gained + 1
-                addToLog(w, id)
-            end
-        end
-        w.unaccountedItems = (w.unaccountedItems or 0) + gained
+        -- Bag items that appeared while unmonitored. (An off-radar item parked in the bank
+        -- isn't visible here — the bank frame is closed at login — so it's caught later by
+        -- the bank-open compare instead.)
+        w.unaccountedItems = (w.unaccountedItems or 0) + foldGains(w, w.items, curItems)
         w.money, w.items = curMoney, curItems
         self._ready = true
         -- Flip the member's roster row now rather than waiting a full StatusInterval,
@@ -153,8 +186,60 @@ function Integrity:OnBagUpdate()
     if not self._ready or self._bagTimer then return end
     self._bagTimer = self:ScheduleTimer(function()
         self._bagTimer = nil
-        if self._ready then wealth().items = scanBags() end
+        if not self._ready then return end
+        wealth().items = scanBags()
+        -- A bag change while the bank is open is usually a bags↔bank move; refresh the
+        -- bank side too so the transfer stays neutral (only counts once the compare below
+        -- has run — see OnBankOpened).
+        if self._bankOpen and self._bankCompared then wealth().bankItems = scanBank() end
     end, 0.5)
+end
+
+-- ---------------------------------------------------------------------------
+-- Bank sessions. On open we compare the bank against the last monitored bank state to
+-- catch items deposited while the addon was off, then keep the bank baseline current for
+-- the rest of the session so ordinary (monitored) deposits/withdrawals never count.
+-- ---------------------------------------------------------------------------
+function Integrity:OnBankOpened()
+    self._bankOpen = true
+    self._bankCompared = false
+    -- Bank container data populates a moment after the frame opens; compare once it's
+    -- there. Until the compare runs, in-session refreshes are held off (_bankCompared)
+    -- so an early BAG_UPDATE can't overwrite the pre-open baseline first.
+    self:ScheduleTimer("BankScanCompare", 0.5)
+end
+
+function Integrity:BankScanCompare()
+    if not self._bankOpen then return end          -- closed again already
+    local w = wealth()
+    local cur = scanBank()
+    -- Only fold gains once we have a prior bank baseline AND Guild Found is active; the
+    -- first bank observation just establishes the reference. No /played-gap gating is
+    -- needed — the bank only changes while open, so any difference from the last monitored
+    -- bank state necessarily happened while the bank was open but unmonitored (addon off).
+    if w.bankItems ~= nil and Addon:WealthIntegrityOn() then
+        local gained = foldGains(w, w.bankItems, cur)
+        if gained > 0 then
+            w.unaccountedItems = (w.unaccountedItems or 0) + gained
+            if ns.Comm and ns.Comm.SendStatus then ns.Comm:SendStatus() end
+        end
+    end
+    w.bankItems = cur
+    self._bankCompared = true
+end
+
+function Integrity:OnBankSlots()
+    -- A bank slot changed during a session: keep the baseline current (post-compare only).
+    if not self._bankOpen or not self._bankCompared or self._bankTimer then return end
+    self._bankTimer = self:ScheduleTimer(function()
+        self._bankTimer = nil
+        if self._bankOpen then wealth().bankItems = scanBank() end
+    end, 0.5)
+end
+
+function Integrity:OnBankClosed()
+    self._bankOpen = false
+    self._bankCompared = false
 end
 
 -- Final snapshot at logout — the value compared on next login. If we never became
@@ -196,5 +281,8 @@ function Integrity:Rebaseline()
     w.unaccountedItems = 0
     w.itemLog = {}
     snapshotNow(w)
+    -- The bank baseline is already current from the last bank observation (the discrepancy
+    -- was folded and bankItems updated then); refresh it only if the bank is open right now.
+    if self._bankOpen and self._bankCompared then w.bankItems = scanBank() end
     if ns.Comm and ns.Comm.SendStatus then ns.Comm:SendStatus() end
 end

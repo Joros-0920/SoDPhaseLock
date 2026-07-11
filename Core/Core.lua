@@ -117,14 +117,16 @@ local defaults = {
         -- are the last observed snapshot (copper, and bag itemID→count) the addon saw
         -- while loaded; on a login that Playtime attributes to an addon-off gap, the
         -- difference from this snapshot is folded into the `unaccounted*` counters (the
-        -- metric reported in the status ping) before the snapshot is refreshed. Reset by
-        -- an officer forgive. Bags only — bank contents are unreadable unless the bank
-        -- frame is open. See Modules/Integrity.lua.
+        -- metric reported in the status ping) before the snapshot is refreshed. `bankItems`
+        -- is the parallel bank baseline, sampled only while the bank frame is open and
+        -- compared on the next open (an off-radar deposit isn't visible in bags at login).
+        -- Reset by an officer forgive. See Modules/Integrity.lua.
         wealth = {
             money            = nil,   -- copper baseline (nil until first snapshot)
-            items            = {},    -- itemID → count baseline (bags only)
+            items            = {},    -- itemID → count baseline (bags)
+            -- bankItems     = nil,   -- itemID → count baseline (bank); added lazily on first bank open
             unaccountedMoney = 0,     -- signed copper accrued across unmonitored gaps
-            unaccountedItems = 0,     -- count of distinct itemIDs gained across gaps
+            unaccountedItems = 0,     -- count of distinct itemIDs gained across gaps (bags + bank)
             itemLog          = {},    -- bounded set of gained itemIDs, for the officer display
         },
     },
