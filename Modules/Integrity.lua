@@ -81,13 +81,20 @@ local function scanBags() return scanContainers(bagContainers()) end
 local function scanBank() return scanContainers(bankContainers()) end
 
 local function snapshotNow(w)
-    w.money = (GetMoney and GetMoney()) or 0
-    -- Never overwrite a populated item baseline with an EMPTY scan. GetMoney() reads valid
-    -- the instant we log in, but the container API populates a few seconds later, so a scan
-    -- run before bags load returns {} even for a full inventory. Persisting that empty table
-    -- as the baseline turns the next gap-fold into a whole-inventory false flag (every item
-    -- reads as "gained" against an empty base). A genuinely-empty scan only establishes the
-    -- baseline when there isn't one yet.
+    -- Money guard, the mirror of the item guard below. GetMoney() was long assumed to read valid
+    -- the instant we log in, but it can momentarily return 0 while money data loads (the same lag
+    -- the container API has for bags). Persisting a spurious 0 as the baseline makes the next
+    -- gap-login fold the player's ENTIRE balance as "off-radar" (curMoney - 0), stacking on every
+    -- relog. So don't clobber a real positive baseline with a 0 read — accept 0 only to seed a
+    -- first-ever baseline (w.money == nil). A legitimate spend-to-zero is recorded by steady-state
+    -- OnMoney once the session is ready.
+    local m = (GetMoney and GetMoney()) or 0
+    if m > 0 or w.money == nil then w.money = m end
+    -- Never overwrite a populated item baseline with an EMPTY scan. The container API populates a
+    -- few seconds after login, so a scan run before bags load returns {} even for a full
+    -- inventory. Persisting that empty table as the baseline turns the next gap-fold into a
+    -- whole-inventory false flag (every item reads as "gained" against an empty base). A
+    -- genuinely-empty scan only establishes the baseline when there isn't one yet.
     local scanned = scanBags()
     if next(scanned) ~= nil or w.items == nil or next(w.items) == nil then
         w.items = scanned
@@ -200,9 +207,17 @@ function Integrity:OnLoginAttributed(gap, added, wealthAdded)
     if wealthAdded and hadBaseline and Addon:WealthIntegrityOn() then
         local curMoney = (GetMoney and GetMoney()) or 0
         -- Signed money delta across the gap. Net-cancelling equal/opposite moves is
-        -- acceptable — a closed economy cares that wealth reconciles, not the path. Money
-        -- reads valid immediately at login, so this folds right away (no retry needed).
-        w.unaccountedMoney = (w.unaccountedMoney or 0) + (curMoney - w.money)
+        -- acceptable — a closed economy cares that wealth reconciles, not the path.
+        -- Fold ONLY against a trustworthy prior baseline. A baseline of 0 is the signature of an
+        -- unread GetMoney() at login (see snapshotNow) — NOT a genuinely-broke player often enough
+        -- to matter — and folding a 0 → N jump (re)counts the player's ENTIRE balance as off-radar
+        -- on every gap-login, stacking on each relog (observed: +5g11s → +10g22s → …). Same guard
+        -- as the empty-item-baseline path in FoldItemsWhenReady. Trade-off: a genuinely-broke
+        -- player (0 copper) who received gold while the addon was off is missed once — conservative,
+        -- and far better than repeatedly flagging every member's whole balance.
+        if w.money > 0 then
+            w.unaccountedMoney = (w.unaccountedMoney or 0) + (curMoney - w.money)
+        end
         w.money = curMoney
         -- Bag items that appeared while unmonitored. (An off-radar item parked in the bank
         -- isn't visible here — the bank frame is closed at login — so it's caught later by

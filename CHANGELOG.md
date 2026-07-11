@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.4] - 2026-07-11
+
+### Fixed
+- **Fixed a false Guild Found wealth flag that reported your entire gold balance as "off-radar," and grew every time you relogged.** The money check could compare your current gold against a baseline of **0** (money data, like bags, can read as 0 for a moment right after login), so it counted your whole balance as gained-while-addon-off — and stacked another full balance on each addon-off/on cycle (e.g. 5g → +5g → +10g …). This was the gold-side version of the whole-inventory false flag fixed for items in 0.7.2; the money path never got the same guard. It now refuses to fold against a 0/unread baseline and won't overwrite a real balance with a spurious 0. Members already carrying an inflated counter should be **Cleared** once (roster Clear button or `/sodlock clearflag <name>`); it won't re-inflate after the clear.
+
+---
+
 ## [0.7.3] - 2026-07-11
 
 ### Added
