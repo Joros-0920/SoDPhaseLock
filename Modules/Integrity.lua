@@ -57,6 +57,14 @@ end
 local function scanBags() return addEquipped(Bags.counts(Bags.bagIDs())) end
 local function scanBank() return Bags.counts(Bags.bankIDs()) end
 
+-- Shallow copy of an itemID→count scan, so a migration/credit step can add to a copy without
+-- mutating the persisted baseline in place.
+local function copyCounts(t)
+    local c = {}
+    if t then for id, n in pairs(t) do c[id] = n end end
+    return c
+end
+
 -- Inbox item contents (itemID → count), readable only while the mail frame is open. Used as a
 -- CREDIT SOURCE only (see foldBagGainsAtLogin): taking your own item from the mailbox to your
 -- bags while the addon was off would otherwise read as a bag gain from nowhere. We do NOT fold
@@ -139,6 +147,7 @@ local function snapshotNow(w)
     local scanned = scanBags()
     if bagsLoaded() or w.items == nil or next(w.items) == nil then
         w.items = scanned
+        w.equipInBaseline = true   -- scanBags() includes equipped, so this baseline is migration-clean
     end
 end
 
@@ -311,8 +320,18 @@ function Integrity:FoldItemsWhenReady(attempt)
     local stable = loaded and self._prevScan ~= nil and scansEqual(self._prevScan, curItems)
     if baseReady and stable then
         self._prevScan = nil
-        w.unaccountedItems = (w.unaccountedItems or 0) + foldBagGainsAtLogin(w, w.items, curItems)
+        -- One-time migration for baselines written before equipped gear was folded into the
+        -- carried inventory (v0.7.5): those hold BAG items only, so a bags∪equipped current scan
+        -- reads every worn piece as an off-radar "gain" on the first post-upgrade gap-login. Credit
+        -- the currently-equipped set into a copy of the old base so worn gear nets to zero; genuine
+        -- bag gains this login are still caught. A real off-radar GEAR swap during this single gap
+        -- is missed once — conservative, same trade-off as the money 0-baseline guard — and only for
+        -- the one migrating login. Cleared thereafter via the equipInBaseline flag.
+        local base = w.items
+        if not w.equipInBaseline then base = addEquipped(copyCounts(base)) end
+        w.unaccountedItems = (w.unaccountedItems or 0) + foldBagGainsAtLogin(w, base, curItems)
         w.items = curItems
+        w.equipInBaseline = true
         self._ready = true
         if ns.Comm and ns.Comm.SendStatus then ns.Comm:SendStatus() end
         return
@@ -325,7 +344,7 @@ function Integrity:FoldItemsWhenReady(attempt)
     -- Gave up: bags never populated / never stabilised (or there was genuinely no prior baseline
     -- to compare against). Take whatever we have now as the baseline so steady-state tracking can
     -- begin; this login's gap simply can't be folded (conservative — a missed gain beats a false flag).
-    if loaded then w.items = curItems end
+    if loaded then w.items = curItems; w.equipInBaseline = true end
     self._prevScan = nil
     self._ready = true
 end
@@ -412,11 +431,13 @@ function Integrity:OnBagUpdate()
     self._bagTimer = self:ScheduleTimer(function()
         self._bagTimer = nil
         if not self._ready then return end
-        wealth().items = scanBags()
+        local w = wealth()
+        w.items = scanBags()
+        w.equipInBaseline = true   -- scanBags() includes equipped; keep the migration flag set
         -- A bag change while the bank is open is usually a bags↔bank move; refresh the
         -- bank side too so the transfer stays neutral (only counts once the compare below
         -- has run — see OnBankOpened).
-        if self._bankOpen and self._bankCompared then wealth().bankItems = scanBank() end
+        if self._bankOpen and self._bankCompared then w.bankItems = scanBank() end
     end, 0.5)
 end
 

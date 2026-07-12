@@ -123,7 +123,10 @@ local defaults = {
         -- Reset by an officer forgive. See Modules/Integrity.lua.
         wealth = {
             money            = nil,   -- copper baseline (nil until first snapshot)
-            items            = {},    -- itemID → count baseline (bags)
+            items            = {},    -- itemID → count baseline (bags + equipped, see Integrity.lua)
+            -- equipInBaseline = nil, -- set once `items` includes equipped gear; guards the one-time
+            --                        -- migration of pre-0.7.5 bags-only baselines (else worn gear
+            --                        -- reads as an off-radar gain on the first post-upgrade login)
             -- bankItems     = nil,   -- itemID → count baseline (bank); added lazily on first bank open
             -- mailItems     = nil,   -- itemID → count baseline (inbox); credit source only, sampled while mail open
             -- mailMoney     = nil,   -- copper sitting in the inbox; credit source only (nets out taking your own mailed gold)

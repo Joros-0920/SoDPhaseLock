@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.6] - 2026-07-12
+
+### Fixed
+- **Upgrading no longer flags your whole worn set as "gained while addon off."** Because older versions recorded only your bag contents, the first login after updating compared your now-tracked equipped gear against a bags-only record and reported every piece you were wearing as off-radar. The upgrade now migrates that record so your equipped gear is recognised as already-owned. (Anyone who already got this false flag should be **Cleared** once — roster Clear button or `/sodlock clearflag <name>`; it won't come back.)
+
+---
+
 ## [0.7.5] - 2026-07-12
 
 ### Added
