@@ -392,6 +392,15 @@ function Integrity:OnLoginAttributed(gap, added, wealthAdded)
             w.unaccountedMoney = (w.unaccountedMoney or 0) + delta
         end
         w.money = curMoney
+        -- Arm the bank fold. The bank is invisible at login, so an off-radar deposit made during
+        -- THIS gap surfaces only at the next bank open — which may be sessions away. Rather than
+        -- fold every bank difference (which would flag ordinary loaded deposits the moment the
+        -- in-session baseline has any hole — e.g. deposit-then-close inside the 0.5s refresh
+        -- debounce), we record that a genuine gap happened and let ONLY the first bank open after
+        -- it fold. Durable (survives clean relogs until consumed) so a gap-deposit opened many
+        -- sessions later is still caught, and cleared the moment a bank compare runs. This is what
+        -- keeps a continuously-loaded member from ever being bank-flagged. See BankScanCompare.
+        w.bankGapPending = true
         -- Bag items that appeared while unmonitored. (An off-radar item parked in the bank
         -- isn't visible here — the bank frame is closed at login — so it's caught later by
         -- the bank-open compare instead.) The container API can lag login by a few seconds,
@@ -459,17 +468,22 @@ function Integrity:BankScanCompare()
     if not self._bankOpen then return end          -- closed again already
     local w = wealth()
     local cur = scanBank()
-    -- Only fold gains once we have a prior bank baseline AND Guild Found is active; the
-    -- first bank observation just establishes the reference. No /played-gap gating is
-    -- needed — the bank only changes while open, so any difference from the last monitored
-    -- bank state necessarily happened while the bank was open but unmonitored (addon off).
-    -- Only fold against a POPULATED prior bank baseline, and only when this scan is
-    -- populated too — bank container data lands a moment after the frame opens, so an
-    -- early empty scan must not become the baseline (it would flag the whole bank on the
-    -- next open) nor be diffed as a total loss/gain. Same guard as the bag path above.
+    -- Fold gains only when ALL hold: a prior bank baseline, Guild Found active, AND a genuine
+    -- addon-off gap has been attributed since we last observed the bank (w.bankGapPending, set in
+    -- OnLoginAttributed). The gap gate is the correctness invariant: without it, ANY bank
+    -- difference folds, so a continuously-loaded member whose in-session bank baseline missed a
+    -- move (e.g. a deposit-then-close inside the 0.5s OnBankSlots debounce) gets flagged for a
+    -- relocation that never left the closed economy — a false positive with the addon installed
+    -- the whole time. Between two bank observations the bank can only change while open (tracked
+    -- while loaded) or while the addon is off (a gap), so folding only on a pending gap captures
+    -- exactly the off-radar case and never a loaded one.
+    -- Only fold against a POPULATED prior bank baseline, and only when this scan is populated too
+    -- — bank container data lands a moment after the frame opens, so an early empty scan must not
+    -- become the baseline (it would flag the whole bank on the next open) nor be diffed as a total
+    -- loss/gain. Same guard as the bag path above.
     local baseReady = w.bankItems ~= nil and next(w.bankItems) ~= nil
     local curReady  = next(cur) ~= nil
-    if baseReady and curReady and Addon:WealthIntegrityOn() then
+    if baseReady and curReady and w.bankGapPending and Addon:WealthIntegrityOn() then
         local gained = foldBankGains(w, w.bankItems, cur)
         if gained > 0 then
             w.unaccountedItems = (w.unaccountedItems or 0) + gained
@@ -483,6 +497,11 @@ function Integrity:BankScanCompare()
         -- consumed above (or a first-ever baseline that folds nothing) is discarded now
         -- rather than lingering to mask an unrelated future bank gain of the same itemID.
         w.pendingBankCredit = nil
+        -- Consume the gap arming: the bank is now reconciled to current, so a later loaded
+        -- deposit (no new gap) can't be folded on the following open. A subsequent real gap
+        -- re-arms it. Cleared whether or not we actually folded (a gold-only gap arms this too,
+        -- finds no bank gain, and must still disarm so it can't fold an unrelated future move).
+        w.bankGapPending = nil
     end
     self._bankCompared = true
 end
@@ -584,6 +603,7 @@ function Integrity:Rebaseline()
     w.unaccountedItems = 0
     w.itemLog = {}
     w.pendingBankCredit = nil   -- drop any unconsumed deposit credit so it can't mask a post-forgive gain
+    w.bankGapPending = nil      -- disarm the bank fold; a pre-forgive gap must not fold at a later open
     snapshotNow(w)
     -- The bank/mail baselines are already current from their last observation; refresh them
     -- only if their frame is open right now.

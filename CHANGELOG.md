@@ -4,6 +4,14 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.8] - 2026-07-12
+
+### Fixed
+- **The bank check can no longer flag a member whose addon was running the whole time.** The bank-deposit detector fired on any difference from the last-seen bank state, with no check that an addon-off period had actually occurred — so an ordinary bag→bank deposit that the in-session tracking narrowly missed (e.g. depositing and closing the bank in the same instant) could be reported as gold/items moved "while addon off." It now only reconciles the bank after a genuine addon-off gap has been detected, exactly like the gold and bag-item checks. A member who never turns the addon off is never flagged. (Off-radar bank deposits made with the addon actually off are still caught on the next bank visit.)
+- **Sub-gold wealth changes no longer show as a confusing "+0g while addon off."** The wealth-integrity reason rounded to whole gold, so a genuine change under 1 gold (a few silver/copper of vendor/quest/loot income picked up while the addon was off) displayed as "+0g" even though the flag was real. It now shows the exact amount down to copper (e.g. "+34s 20c", "-3s"). Display-only — what gets flagged is unchanged.
+
+---
+
 ## [0.7.7] - 2026-07-12
 
 ### Changed

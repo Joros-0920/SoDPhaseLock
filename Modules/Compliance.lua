@@ -35,11 +35,23 @@ local function fmtDuration(seconds)
     return string.format("%dm", math.floor(seconds / 60))
 end
 
--- Sign-aware, gold-rounded money for the wealth-integrity reason ("+340g" / "-12g").
+-- Sign-aware money for the wealth-integrity reason. Renders the exact amount down to
+-- copper ("+5g 11s 13c" / "-3s"), listing only the nonzero units, so a genuine sub-gold
+-- change is never rounded away to a misleading "+0g" (the trigger flags ANY nonzero copper
+-- — see Record's moneyHit — so the display must be able to express amounts under 1g).
 local function fmtMoney(copper)
     copper = copper or 0
-    local gold = copper / 10000
-    return string.format("%+dg", (gold >= 0) and math.floor(gold + 0.5) or -math.floor(-gold + 0.5))
+    local sign = (copper < 0) and "-" or "+"
+    local abs = math.abs(copper)
+    local g = math.floor(abs / 10000)
+    local s = math.floor((abs % 10000) / 100)
+    local c = abs % 100
+    local parts = {}
+    if g > 0 then parts[#parts + 1] = g .. "g" end
+    if s > 0 then parts[#parts + 1] = s .. "s" end
+    if c > 0 then parts[#parts + 1] = c .. "c" end
+    if #parts == 0 then parts[1] = "0c" end
+    return sign .. table.concat(parts, " ")
 end
 
 -- ---------------------------------------------------------------------------

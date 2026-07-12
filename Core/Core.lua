@@ -132,6 +132,9 @@ local defaults = {
             -- mailMoney     = nil,   -- copper sitting in the inbox; credit source only (nets out taking your own mailed gold)
             -- pendingBankCredit = nil,  -- itemID → count of bag losses at the last gap-login, credited
                                          -- against the next bank-open gain to net out a bag→bank deposit
+            -- bankGapPending = nil,     -- set when an addon-off gap is attributed; gates the bank fold so
+                                         -- only the first bank open after a real gap folds (never a loaded
+                                         -- deposit), consumed at that open. Keeps a loaded member unflagged.
             unaccountedMoney = 0,     -- signed copper accrued across unmonitored gaps
             unaccountedItems = 0,     -- quantity of items gained across gaps (bags + bank; bank/mail relocation netted out)
             itemLog          = {},    -- bounded set of gained itemIDs, for the officer display
@@ -584,6 +587,8 @@ function Addon:HandleSlash(input)
         if pendCount > 0 then
             self:Print(string.format("  pending deposit credit: %d item type(s) (bag losses awaiting a bank-open match)", pendCount))
         end
+        self:Print(string.format("  bank fold armed: %s  (only a real addon-off gap arms it; consumed at next bank open)",
+            w.bankGapPending and "|cffffff00yes|r" or "no"))
         local money = integrity and integrity:GetUnaccountedMoney() or 0
         local items = integrity and integrity:GetUnaccountedItems() or 0
         self:Print(string.format("  reported so far: %+dc, %d item(s) gained while off",
