@@ -270,6 +270,7 @@ function Comm:SendStatus()
         vI    = v.instance and 1 or 0,
         vG    = v.gear or 0,
         vE    = v.enchant or 0,
+        vBG   = v.bagGear or 0,                  -- over-phase items carried in bags (informational; old clients omit → nil)
         vP    = v.profession and 1 or 0,
         vQ    = v.quest or 0,
         vR    = v.rune and 1 or 0,
@@ -288,7 +289,7 @@ function Comm:SendStatus()
         -- addon-off gap (see Modules/Integrity.lua). Receivers evaluate against the
         -- synced threshold and set a sticky flag, like the played gap above.
         wm    = (ns.Integrity and ns.Integrity:GetUnaccountedMoney()) or 0,  -- signed copper
-        wq    = (ns.Integrity and ns.Integrity:GetUnaccountedItems()) or 0,  -- distinct itemIDs gained
+        wq    = (ns.Integrity and ns.Integrity:GetUnaccountedItems()) or 0,  -- quantity of items gained
         wl    = ns.Integrity and ns.Integrity:GetItemLog() or nil,           -- bounded gained-itemID list (display)
         v     = VERSION,                         -- addon version, for out-of-date detection
     })

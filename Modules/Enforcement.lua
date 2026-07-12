@@ -9,6 +9,7 @@ Enforcement.violations = {
     instance   = false,   -- currently inside a not-yet-unlocked instance
     gear       = 0,       -- count of equipped over-phase items
     enchant    = 0,       -- count of equipped items carrying a later-phase enchant
+    bagGear    = 0,       -- count of over-phase items CARRIED in bags (informational; bags aren't enforced)
     profession = false,
     quest      = 0,       -- count of accepted quests from a later phase (authentic only)
     rune       = false,   -- learned at least one rune from a later phase (authentic only)
@@ -32,6 +33,7 @@ function Enforcement:OnEnable()
     self:RegisterEvent("PLAYER_XP_UPDATE",          "CheckLevel")
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED",  "CheckGear")
     self:RegisterEvent("GET_ITEM_INFO_RECEIVED",    "CheckGear")
+    self:RegisterEvent("BAG_UPDATE",                "OnBagChanged")
     self:RegisterEvent("SKILL_LINES_CHANGED",       "CheckProfessions")
     self:RegisterEvent("QUEST_DETAIL",              "OnQuestDetail")
     self:RegisterEvent("QUEST_ACCEPTED",            "OnQuestAccepted")
@@ -95,6 +97,7 @@ function Enforcement:FullScan()
     self:CheckLevel()
     self:OnZoneChanged()
     self:CheckGear()
+    self:CheckBags()
     self:CheckProfessions()
     self:CheckQuestLog()
     self:CheckRune()
@@ -438,6 +441,34 @@ function Enforcement:CheckGear()
     self.violations.rune  = self._runeRelicViol or self._engraveRuneViol or false
 end
 
+-- Over-phase items CARRIED in bags. Purely informational — bags aren't enforced, so nothing is
+-- unequipped/removed; it just surfaces to officers that a member is holding gear from a later
+-- phase (the same best-effort, social-accountability framing as the integrity signals). Gated on
+-- the gear rule being enforced: a guild not locking gear has no reason to nag about bag contents.
+-- Rune relics are excluded (itemViolatesInMode handles that — they're rune-governed, not gear).
+function Enforcement:CheckBags()
+    if not (Addon.db.profile.enabled and enabled("gear")) then
+        self.violations.bagGear = 0
+        return
+    end
+    local phase = P()
+    if not phase then return end
+    local count = 0
+    ns.Bags.forEach(ns.Bags.bagIDs(), function(_, _, itemID)
+        if itemViolatesInMode(itemID, phase) then count = count + 1 end
+    end)
+    self.violations.bagGear = count
+end
+
+-- BAG_UPDATE fires in bursts (looting, moving stacks); debounce the bag re-scan.
+function Enforcement:OnBagChanged()
+    if self._bagScanTimer then return end
+    self._bagScanTimer = self:ScheduleTimer(function()
+        self._bagScanTimer = nil
+        self:CheckBags()
+    end, 0.5)
+end
+
 -- Bind-on-equip confirmation popups. If the item awaiting confirmation is
 -- over-phase, cancel the popup (and clear the cursor) so it never binds/equips.
 -- The pending item is on the cursor for the drag-onto-slot case; right-click /
@@ -465,21 +496,11 @@ function Enforcement:OnBindConfirm()
     Addon:Alert("Blocked equipping " .. link .. " — not available until a later phase.", "blockequip")
 end
 
--- Scan all bags (backpack + slots 1-4) for the first empty slot.
--- Returns (bagID, slotIndex) or nil when every bag is full.
+-- First empty bag slot (backpack + slots 1-4), as (bagID, slotIndex) or nil when full.
+-- Container enumeration is shared via Core/Bags.lua.
 local CC = C_Container
 local function findFreeBagSlot()
-    local numSlots = (CC and CC.GetContainerNumSlots) or GetContainerNumSlots
-    local getItemID = (CC and CC.GetContainerItemID)  or GetContainerItemID
-    if not (numSlots and getItemID) then return nil end
-    for bag = 0, (NUM_BAG_SLOTS or 4) do
-        local n = numSlots(bag) or 0
-        for s = 1, n do
-            if not getItemID(bag, s) then
-                return bag, s
-            end
-        end
-    end
+    return ns.Bags.firstFreeSlot(ns.Bags.bagIDs())
 end
 
 function Enforcement:Unequip(slot)

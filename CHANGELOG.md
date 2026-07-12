@@ -4,6 +4,25 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.5] - 2026-07-12
+
+### Added
+- **Officers can now see when a member is *carrying* over-phase gear in their bags**, not just wearing it. The compliance roster appends a soft note like "(+2 over-phase in bags)" to that member's row. It's **informational only** — carrying isn't wearing, so it does **not** mark them out of compliance and nothing is auto-removed. Only shown when the guild enforces the gear rule, and rune relics (idols/librams/totems) are excluded.
+
+### Changed
+- **Guild Found now reports the actual *quantity* of items gained while the addon was off, not just how many distinct item types.** Looting a stack of 20 herbs off-radar now reads "20 item(s)" instead of "1".
+- **Internal refactor (no behavior change):** the low-level bag/bank scanning code — duplicated across the wealth-integrity check, the auto-unequip free-slot search, and the bag-overlay diagnostics — now lives in one shared place. Keeps the three in lock-step so future fixes can't drift between them.
+
+### Fixed
+- **Fixed a false Guild Found wealth flag when you move your own gear between an equipped slot and your bags.** The item check only ever looked at bag contents, so unequipping a weapon, trinket, etc. into your bags while the addon was off made it look like a brand-new item had appeared from nowhere (e.g. "+0g, 1 item(s) while addon off"). Equipped gear is now counted alongside your bags, so moving a piece you already own between a worn slot and a bag nets out and no longer flags. Nothing genuinely entering your inventory is affected.
+- **Fixed false Guild Found wealth flags when you move your own items between your bags and your bank.** Because the bank can't be read while you're logged out, withdrawing an item from the bank (or depositing one) while the addon was off used to look like an item appearing from nowhere. The check now reconciles bag↔bank moves across the two windows it *can* see: a bag item that matches your last-known bank contents is treated as a withdrawal (not a gain), and an item that left your bags is remembered so a matching deposit is recognised the next time you open the bank. Genuinely new items are still flagged (deferred to your next bank visit in the rare ambiguous case). Requires having opened your bank with the addon on at least once so it knows your bank contents.
+- **No more false Guild Found flags for taking your own items out of your mailbox.** Pulling an item you'd mailed yourself (or that was already in your inbox) into your bags while the addon was off used to look like a brand-new item. The mailbox is now sampled as a known-holdings source and nets those relocations out, the same way bag↔bank moves are reconciled. (Requires having opened your mailbox with the addon on at least once.)
+- **No more false Guild Found flags for taking your own *gold* out of your mailbox.** The mailbox reconciliation initially only covered items; pulling gold you'd mailed yourself into your bags while the addon was off (or right after login) could still read as money appearing from nowhere. Mail gold is now tracked the same way as mail items and nets those relocations out. (Requires having opened your mailbox with the addon on at least once.)
+- **Fixed a false flag when you open mail and grab an attachment *very* quickly after logging in.** The mailbox was sampled on a short delay, so a fast grab could happen before the addon recorded what was in your mailbox — making your own item or gold look brand-new. The mailbox is now captured the instant it opens and remembers the most it held during the visit, so a quick take can't erase its own credit.
+- **More robust against items still loading at login.** The wealth check now waits for your bags to fully settle (two matching scans) before comparing, closing a window where a half-loaded bag or an in-flight stack count could produce a phantom "gained" item right after logging in.
+
+---
+
 ## [0.7.4] - 2026-07-11
 
 ### Fixed

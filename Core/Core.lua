@@ -125,8 +125,12 @@ local defaults = {
             money            = nil,   -- copper baseline (nil until first snapshot)
             items            = {},    -- itemID → count baseline (bags)
             -- bankItems     = nil,   -- itemID → count baseline (bank); added lazily on first bank open
+            -- mailItems     = nil,   -- itemID → count baseline (inbox); credit source only, sampled while mail open
+            -- mailMoney     = nil,   -- copper sitting in the inbox; credit source only (nets out taking your own mailed gold)
+            -- pendingBankCredit = nil,  -- itemID → count of bag losses at the last gap-login, credited
+                                         -- against the next bank-open gain to net out a bag→bank deposit
             unaccountedMoney = 0,     -- signed copper accrued across unmonitored gaps
-            unaccountedItems = 0,     -- count of distinct itemIDs gained across gaps (bags + bank)
+            unaccountedItems = 0,     -- quantity of items gained across gaps (bags + bank; bank/mail relocation netted out)
             itemLog          = {},    -- bounded set of gained itemIDs, for the officer display
         },
     },
@@ -563,15 +567,23 @@ function Addon:HandleSlash(input)
             self:WealthIntegrityOn() and "|cff00ff00yes|r" or "|cffff3030no|r"))
         local integrity = self:GetModule("Integrity", true)
         local w = self.db.char.wealth or {}
-        local itemCount, bankCount = 0, 0
+        local itemCount, bankCount, mailCount, pendCount = 0, 0, 0, 0
         if w.items then for _ in pairs(w.items) do itemCount = itemCount + 1 end end
         if w.bankItems then for _ in pairs(w.bankItems) do bankCount = bankCount + 1 end end
-        self:Print(string.format("  session baseline established: %s  (money:%s items:%d distinct, bank:%d distinct)",
+        if w.mailItems then for _ in pairs(w.mailItems) do mailCount = mailCount + 1 end end
+        if w.pendingBankCredit then for _ in pairs(w.pendingBankCredit) do pendCount = pendCount + 1 end end
+        self:Print(string.format("  session baseline established: %s  (money:%s items:%d, bank:%d, mail:%d distinct types)",
             (integrity and integrity._ready) and "|cff00ff00yes|r" or "|cffff3030not yet|r",
-            w.money and GetCoinTextureString(w.money) or "—", itemCount, bankCount))
+            w.money and GetCoinTextureString(w.money) or "—", itemCount, bankCount, mailCount))
+        if w.mailMoney and w.mailMoney > 0 then
+            self:Print("  mail gold credit available: " .. GetCoinTextureString(w.mailMoney) .. " (nets out taking your own mailed gold)")
+        end
+        if pendCount > 0 then
+            self:Print(string.format("  pending deposit credit: %d item type(s) (bag losses awaiting a bank-open match)", pendCount))
+        end
         local money = integrity and integrity:GetUnaccountedMoney() or 0
         local items = integrity and integrity:GetUnaccountedItems() or 0
-        self:Print(string.format("  reported so far: %+dc, %d distinct item(s) gained while off",
+        self:Print(string.format("  reported so far: %+dc, %d item(s) gained while off",
             money, items))
         local log = integrity and integrity:GetItemLog()
         if log then

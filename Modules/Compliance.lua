@@ -6,6 +6,7 @@ ns.Compliance = Compliance
 -- roster[playerName] = {
 --   level, phase, mode, epoch, overLevel, instance, gear, enchant, profession,
 --   xpLocked (bool, informational — not a violation),
+--   bagGear (count, informational — over-phase items carried in bags; not a violation),
 --   compliant (bool), reasons (string), updated (GetTime())
 -- }
 Compliance.roster = {}
@@ -277,6 +278,15 @@ function Compliance:Record(sender, data)
         reasons[#reasons + 1] = "Guild Found disabled locally"
     end
 
+    -- Over-phase items carried in bags: informational only (bags aren't enforced), so it does
+    -- NOT enter `reasons`/`compliant` — a member stays green — but is appended to the displayed
+    -- reasons cell as a soft note. Mirrors xpLocked's "surfaced but not a violation" treatment.
+    local bagGear = data.vBG or 0
+    local reasonsStr = (#reasons == 0) and "OK" or table.concat(reasons, ", ")
+    if bagGear > 0 then
+        reasonsStr = reasonsStr .. string.format(" (+%d over-phase in bags)", bagGear)
+    end
+
     self.roster[name] = {
         level      = data.lvl,
         phase      = data.phase,
@@ -286,6 +296,7 @@ function Compliance:Record(sender, data)
         instance   = data.vI == 1,
         gear       = data.vG or 0,
         enchant    = data.vE or 0,
+        bagGear    = bagGear,        -- informational; over-phase items carried in bags (excluded from reasons/compliant)
         profession = data.vP == 1,
         quest      = data.vQ or 0,
         rune       = data.vR == 1,
@@ -293,10 +304,10 @@ function Compliance:Record(sender, data)
         version    = data.v,         -- reporter's addon version, for the roster's version column
         unobserved = data.up or 0,   -- reported /played-with-addon-off seconds (drives the Clear/forgive button)
         wealthMoney = data.wm or 0,  -- reported signed copper moved across an addon-off gap
-        wealthItems = data.wq or 0,  -- reported distinct itemIDs gained across the gap
+        wealthItems = data.wq or 0,  -- reported quantity of items gained across the gap
         wealthLog  = data.wl,        -- bounded gained-itemID list, for the officer display
         compliant  = (#reasons == 0),
-        reasons    = (#reasons == 0) and "OK" or table.concat(reasons, ", "),
+        reasons    = reasonsStr,
         updated    = GetTime(),
         raw        = data,   -- kept so an officer clear can re-derive this row at once
     }

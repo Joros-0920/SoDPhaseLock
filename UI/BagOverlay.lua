@@ -409,18 +409,10 @@ end
 function ns.BagDiagnostics()
     local phase = Addon:GetPhaseData()
     local flagged, scanned = 0, 0
-    if not (phase and GetContainerNumSlots and GetContainerItemID) then
-        return flagged, scanned, phase
-    end
-    for bag = 0, (NUM_BAG_SLOTS or 4) do
-        local slots = GetContainerNumSlots(bag) or 0
-        for slot = 1, slots do
-            local itemID = GetContainerItemID(bag, slot)
-            if itemID then
-                scanned = scanned + 1
-                if ns.ItemViolatesPhase(itemID, phase) then flagged = flagged + 1 end
-            end
-        end
-    end
+    if not phase then return flagged, scanned, phase end
+    ns.Bags.forEach(ns.Bags.bagIDs(), function(_, _, itemID)
+        scanned = scanned + 1
+        if ns.ItemViolatesPhase(itemID, phase) then flagged = flagged + 1 end
+    end)
     return flagged, scanned, phase
 end
