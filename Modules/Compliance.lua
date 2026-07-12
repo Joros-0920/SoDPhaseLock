@@ -278,14 +278,12 @@ function Compliance:Record(sender, data)
         reasons[#reasons + 1] = "Guild Found disabled locally"
     end
 
-    -- Over-phase items carried in bags: informational only (bags aren't enforced), so it does
-    -- NOT enter `reasons`/`compliant` — a member stays green — but is appended to the displayed
-    -- reasons cell as a soft note. Mirrors xpLocked's "surfaced but not a violation" treatment.
+    -- Over-phase items carried in bags: informational only (bags aren't enforced) and no longer
+    -- surfaced in the roster — a member carrying later-phase gear in their bags is not out of
+    -- compliance, so it clutters the reasons cell with a non-actionable note. Still stored on the
+    -- roster row (and carried on the wire as vBG) in case a future view wants it.
     local bagGear = data.vBG or 0
     local reasonsStr = (#reasons == 0) and "OK" or table.concat(reasons, ", ")
-    if bagGear > 0 then
-        reasonsStr = reasonsStr .. string.format(" (+%d over-phase in bags)", bagGear)
-    end
 
     self.roster[name] = {
         level      = data.lvl,

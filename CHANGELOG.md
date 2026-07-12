@@ -4,6 +4,13 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.7] - 2026-07-12
+
+### Changed
+- **The compliance roster no longer notes over-phase gear carried in bags.** The "(+N over-phase in bags)" tag has been removed from members' status. Carrying later-phase gear isn't wearing it and was never a violation, so the note was non-actionable clutter next to real statuses (like Guild Found flags). Enforcement is unchanged — equipping over-phase gear is still flagged/blocked as before.
+
+---
+
 ## [0.7.6] - 2026-07-12
 
 ### Fixed
