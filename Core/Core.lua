@@ -113,31 +113,22 @@ local defaults = {
         playtime = {
             unobserved = 0,
         },
-        -- Guild Found wealth-integrity baseline (per realm-character). `money`/`items`
-        -- are the last observed snapshot (copper, and bag itemID→count) the addon saw
-        -- while loaded; on a login that Playtime attributes to an addon-off gap, the
-        -- difference from this snapshot is folded into the `unaccounted*` counters (the
-        -- metric reported in the status ping) before the snapshot is refreshed. `bankItems`
-        -- is the parallel bank baseline, sampled only while the bank frame is open and
-        -- compared on the next open (an off-radar deposit isn't visible in bags at login).
-        -- Reset by an officer forgive. See Modules/Integrity.lua.
+        -- Guild Found wealth-integrity baseline (per realm-character, schema 2 / 0.7.9+).
+        -- A single conserved wealth-VALUE model (copper), not per-item tracking: `money`,
+        -- `vCarried` (bags+equipped sell-value), `vBank` and `vMail` are the last observed
+        -- per-bucket values the addon saw while loaded. On a login that Playtime attributes to
+        -- an addon-off gap, the NET rise in (money + vCarried), credited against vBank/vMail, is
+        -- folded into `unaccountedValue` (reported in the status ping as `wv`). Bank and mail are
+        -- credit sources only. Reset by an officer forgive; pre-0.7.9 baselines are wiped once by
+        -- the schema migration in Modules/Integrity.lua (clean slate). See Modules/Integrity.lua.
         wealth = {
+            schema           = nil,   -- migration marker; set to 2 by the one-time clean-slate reset
             money            = nil,   -- copper baseline (nil until first snapshot)
-            items            = {},    -- itemID → count baseline (bags + equipped, see Integrity.lua)
-            -- equipInBaseline = nil, -- set once `items` includes equipped gear; guards the one-time
-            --                        -- migration of pre-0.7.5 bags-only baselines (else worn gear
-            --                        -- reads as an off-radar gain on the first post-upgrade login)
-            -- bankItems     = nil,   -- itemID → count baseline (bank); added lazily on first bank open
-            -- mailItems     = nil,   -- itemID → count baseline (inbox); credit source only, sampled while mail open
-            -- mailMoney     = nil,   -- copper sitting in the inbox; credit source only (nets out taking your own mailed gold)
-            -- pendingBankCredit = nil,  -- itemID → count of bag losses at the last gap-login, credited
-                                         -- against the next bank-open gain to net out a bag→bank deposit
-            -- bankGapPending = nil,     -- set when an addon-off gap is attributed; gates the bank fold so
-                                         -- only the first bank open after a real gap folds (never a loaded
-                                         -- deposit), consumed at that open. Keeps a loaded member unflagged.
-            unaccountedMoney = 0,     -- signed copper accrued across unmonitored gaps
-            unaccountedItems = 0,     -- quantity of items gained across gaps (bags + bank; bank/mail relocation netted out)
-            itemLog          = {},    -- bounded set of gained itemIDs, for the officer display
+            -- vCarried      = nil,   -- sell-value (copper) of bags + equipped; nil until first ready snapshot
+            -- vBank         = nil,   -- sell-value of the bank; credit source, sampled while the bank frame is open
+            -- vMail         = nil,   -- sell-value of inbox items + inbox gold; credit source, sampled while mail open
+            unaccountedMoney = 0,     -- reserved (money-only portion); kept for forward compatibility
+            unaccountedValue = 0,     -- estimated net copper value gained across unmonitored gaps (wire field wv)
         },
     },
     profile = {
@@ -573,30 +564,13 @@ function Addon:HandleSlash(input)
             self:WealthIntegrityOn() and "|cff00ff00yes|r" or "|cffff3030no|r"))
         local integrity = self:GetModule("Integrity", true)
         local w = self.db.char.wealth or {}
-        local itemCount, bankCount, mailCount, pendCount = 0, 0, 0, 0
-        if w.items then for _ in pairs(w.items) do itemCount = itemCount + 1 end end
-        if w.bankItems then for _ in pairs(w.bankItems) do bankCount = bankCount + 1 end end
-        if w.mailItems then for _ in pairs(w.mailItems) do mailCount = mailCount + 1 end end
-        if w.pendingBankCredit then for _ in pairs(w.pendingBankCredit) do pendCount = pendCount + 1 end end
-        self:Print(string.format("  session baseline established: %s  (money:%s items:%d, bank:%d, mail:%d distinct types)",
+        local function coin(v) return (v and GetCoinTextureString(v)) or "—" end
+        self:Print(string.format("  session baseline established: %s  (money:%s carried:%s bank:%s mail:%s)",
             (integrity and integrity._ready) and "|cff00ff00yes|r" or "|cffff3030not yet|r",
-            w.money and GetCoinTextureString(w.money) or "—", itemCount, bankCount, mailCount))
-        if w.mailMoney and w.mailMoney > 0 then
-            self:Print("  mail gold credit available: " .. GetCoinTextureString(w.mailMoney) .. " (nets out taking your own mailed gold)")
-        end
-        if pendCount > 0 then
-            self:Print(string.format("  pending deposit credit: %d item type(s) (bag losses awaiting a bank-open match)", pendCount))
-        end
-        self:Print(string.format("  bank fold armed: %s  (only a real addon-off gap arms it; consumed at next bank open)",
-            w.bankGapPending and "|cffffff00yes|r" or "no"))
-        local money = integrity and integrity:GetUnaccountedMoney() or 0
-        local items = integrity and integrity:GetUnaccountedItems() or 0
-        self:Print(string.format("  reported so far: %+dc, %d item(s) gained while off",
-            money, items))
-        local log = integrity and integrity:GetItemLog()
-        if log then
-            self:Print("  logged item IDs: " .. table.concat(log, ", "))
-        end
+            coin(w.money), coin(w.vCarried), coin(w.vBank), coin(w.vMail)))
+        local value = integrity and integrity:GetUnaccountedValue() or 0
+        self:Print(string.format("  estimated value gained while off: %s  (best-effort; vendor sell price, unknown items count 0)",
+            (value ~= 0) and GetCoinTextureString(value) or "none"))
     else
         if ns.OpenOptions then ns.OpenOptions() end
     end

@@ -47,10 +47,11 @@ StaticPopupDialogs["SODPHASELOCK_GFCLEAR_CONFIRM"] = {
 }
 
 -- ---------------------------------------------------------------------------
--- Guild Found wealth "Audit" window: itemises the gold and items a member's status
--- ping reported as having moved while their addon was off (Modules/Integrity.lua).
--- The item IDs ride the ping as `wl` and are stored on the roster row as `wealthLog`;
--- money as `wealthMoney`. Opened from the officer/self "Audit" button on a flagged row.
+-- Guild Found wealth "Audit" window (0.7.9+): shows the estimated net VALUE a member's
+-- status ping reported as having moved while their addon was off (Modules/Integrity.lua),
+-- framed around the authoritative /played gap and explicitly best-effort. A pre-0.7.9
+-- member instead carries the legacy per-item list (`wealthLog`/`wealthMoney`), still shown
+-- for a mixed-version guild. Opened from the officer/self "Audit" button on a flagged row.
 -- ---------------------------------------------------------------------------
 local auditFrame
 local auditPlayer
@@ -100,6 +101,28 @@ local function ShowAudit(playerName, isRetry)
         return
     end
 
+    -- Headline: the authoritative signal is the /played gap (server-side, monotonic). The
+    -- wealth figure is corroboration, not proof.
+    local gap = info.unobserved or 0
+    if gap > 0 then
+        local hrs = gap / 3600
+        addNoteInline(scroll, string.format("|cffffd100Unmonitored play:|r %s (addon not loaded)",
+            (hrs >= 1) and string.format("%.1f h", hrs) or string.format("%d min", math.floor(gap / 60))))
+    end
+
+    if info.wealthValue ~= nil then
+        -- 0.7.9+ value scalar.
+        local val = info.wealthValue or 0
+        addNoteInline(scroll, "\n|cffffd100Estimated value moved while addon off:|r "
+            .. ((val > 0) and ("+ " .. (GetCoinTextureString and GetCoinTextureString(val) or (val .. "c"))) or "|cff808080none|r"))
+        addNoteInline(scroll, "\n|cff808080Best-effort estimate from vendor sell prices; unknown items count as 0, and"
+            .. " gains equal in value to bank/mail contents are conservatively not counted. This is a signal that"
+            .. " the member acquired value while unmonitored — corroboration for the /played gap above, not proof of"
+            .. " a specific trade.|r")
+        return
+    end
+
+    -- Legacy (pre-0.7.9) member: itemised gold + per-item list, as before.
     local money = AceGUI:Create("Label")
     money:SetFullWidth(true)
     money:SetText("|cffffd100Gold moved:|r " .. fmtAuditMoney(info.wealthMoney))
@@ -132,10 +155,6 @@ local function ShowAudit(playerName, isRetry)
             end)
             row:SetCallback("OnLeave", function() GameTooltip:Hide() end)
             scroll:AddChild(row)
-        end
-        if count > #log then
-            addNoteInline(scroll, string.format(
-                "|cff808080…and %d more item(s) not individually listed (the report caps the list).|r", count - #log))
         end
         -- Item names/textures resolve asynchronously; rebuild once if any weren't cached.
         if anyUncached and not isRetry and C_Timer and C_Timer.After then

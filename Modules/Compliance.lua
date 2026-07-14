@@ -54,6 +54,20 @@ local function fmtMoney(copper)
     return sign .. table.concat(parts, " ")
 end
 
+-- Coarse, single-unit "~Ng" for the best-effort wealth-value footnote (0.7.9+). Deliberately
+-- imprecise: the value is a vendor-sell-price ESTIMATE, so a rounded magnitude reads honestly
+-- where a to-the-copper figure would imply precision the signal doesn't have.
+local function fmtApprox(copper)
+    copper = copper or 0
+    if copper >= 10000 then
+        return string.format("~%dg", math.floor(copper / 10000))
+    elseif copper >= 100 then
+        return string.format("~%ds", math.floor(copper / 100))
+    else
+        return string.format("~%dc", copper)
+    end
+end
+
 -- ---------------------------------------------------------------------------
 -- Persisted integrity flags (see Core.lua db.global.gfFlags).
 --
@@ -220,13 +234,23 @@ function Compliance:Record(sender, data)
     -- is acceptable, so ANY change flags. Durable like the played gap — reported every ping
     -- until an officer forgives it — so no saved flag is needed.
     if Addon:WealthIntegrityOn() then
-        local moneyHit = (data.wm or 0) ~= 0
-        local itemHit  = (data.wq or 0) > 0
-        if moneyHit or itemHit then
-            local parts = {}
-            if moneyHit then parts[#parts + 1] = fmtMoney(data.wm) end
-            if itemHit  then parts[#parts + 1] = string.format("%d item(s)", data.wq) end
-            reasons[#reasons + 1] = "Guild Found: " .. table.concat(parts, ", ") .. " while addon off"
+        -- 0.7.9+ reports a single estimated-value scalar (`wv`); the authoritative signal is the
+        -- /played gap above, so this is a best-effort footnote, deliberately fuzzy ("~5g, est.")
+        -- rather than the old false-precision "+5g 11s 13c, 3 item(s)". A pre-0.7.9 member sends
+        -- no `wv`; fall back to their legacy wm/wq so a mixed-version officer still sees the flag.
+        if data.wv ~= nil then
+            if (data.wv or 0) > 0 then
+                reasons[#reasons + 1] = "Guild Found: " .. fmtApprox(data.wv) .. " moved while unmonitored (est.)"
+            end
+        else
+            local moneyHit = (data.wm or 0) ~= 0
+            local itemHit  = (data.wq or 0) > 0
+            if moneyHit or itemHit then
+                local parts = {}
+                if moneyHit then parts[#parts + 1] = fmtMoney(data.wm) end
+                if itemHit  then parts[#parts + 1] = string.format("%d item(s)", data.wq) end
+                reasons[#reasons + 1] = "Guild Found: " .. table.concat(parts, ", ") .. " while addon off"
+            end
         end
     end
     -- Tamper signal: a Guild Found restriction the guild has ON, but this member's addon
@@ -313,9 +337,10 @@ function Compliance:Record(sender, data)
         xpLocked   = data.vX == 1,   -- informational; intentionally excluded from reasons/compliant
         version    = data.v,         -- reporter's addon version, for the roster's version column
         unobserved = data.up or 0,   -- reported /played-with-addon-off seconds (drives the Clear/forgive button)
-        wealthMoney = data.wm or 0,  -- reported signed copper moved across an addon-off gap
-        wealthItems = data.wq or 0,  -- reported quantity of items gained across the gap
-        wealthLog  = data.wl,        -- bounded gained-itemID list, for the officer display
+        wealthValue = data.wv,       -- 0.7.9+ estimated net copper value moved across an addon-off gap (nil ⇒ legacy member)
+        wealthMoney = data.wm or 0,  -- legacy (pre-0.7.9): signed copper; still shown for a mixed-version member
+        wealthItems = data.wq or 0,  -- legacy (pre-0.7.9): quantity of items gained
+        wealthLog  = data.wl,        -- legacy (pre-0.7.9): bounded gained-itemID list, for the officer display
         compliant  = (#reasons == 0),
         reasons    = reasonsStr,
         updated    = GetTime(),
@@ -367,6 +392,8 @@ function Compliance:HasWealthGap(name)
     if not Addon:WealthIntegrityOn() then return false end
     local info = self.roster[rosterKey(self, name)]
     if not info then return false end
+    -- 0.7.9+ uses the value scalar; fall back to legacy money/item fields for a mixed-version member.
+    if info.wealthValue ~= nil then return info.wealthValue > 0 end
     return (info.wealthMoney or 0) ~= 0 or (info.wealthItems or 0) > 0
 end
 

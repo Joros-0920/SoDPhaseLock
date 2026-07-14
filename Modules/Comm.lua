@@ -285,12 +285,13 @@ function Comm:SendStatus()
         en    = Addon.db.profile.enabled and 1 or 0,  -- local master switch; 0 ⇒ NOTHING is enforced (Guild Found included)
         up    = (ns.Playtime and ns.Playtime:GetUnobserved()) or 0,  -- cumulative /played seconds accrued with the addon NOT loaded
         ob    = ns.Playtime and ns.Playtime:GetObserved() or nil,    -- witnessed-/played high-water, so peers can reconcile our alternate PCs
-        -- Guild Found wealth integrity: cumulative gold/items that moved across an
-        -- addon-off gap (see Modules/Integrity.lua). Receivers evaluate against the
-        -- synced threshold and set a sticky flag, like the played gap above.
-        wm    = (ns.Integrity and ns.Integrity:GetUnaccountedMoney()) or 0,  -- signed copper
-        wq    = (ns.Integrity and ns.Integrity:GetUnaccountedItems()) or 0,  -- quantity of items gained
-        wl    = ns.Integrity and ns.Integrity:GetItemLog() or nil,           -- bounded gained-itemID list (display)
+        -- Guild Found wealth integrity (schema 2 / 0.7.9+): estimated net VALUE that moved
+        -- across an addon-off gap (see Modules/Integrity.lua). Single conserved value scalar;
+        -- receivers surface it as a best-effort footnote to the authoritative /played gap above.
+        -- The old per-item fields (wm/wq/wl) are no longer sent — a pre-0.7.9 officer viewing a
+        -- 0.7.9 member falls back to the `up` played gap; a 0.7.9 officer still reads a legacy
+        -- member's wm/wq (see Compliance:Record).
+        wv    = (ns.Integrity and ns.Integrity:GetUnaccountedValue()) or 0,  -- estimated net copper value gained
         v     = VERSION,                         -- addon version, for out-of-date detection
     })
 end

@@ -4,6 +4,20 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.9] - 2026-07-14
+
+### Changed
+- **Rebuilt the "wealth moved while addon off" check to be far less brittle.** It used to track gold and every individual item across five separate axes (bags, worn gear, bank, mail, plus per-item credit ledgers to net out relocations) — the source of a long string of false positives (worn gear, bank↔bag moves, equip↔bag moves, half-loaded bags at login). It now tracks a **single total wealth *value*** instead, so moving an item between your bags, gear, or bank can never read as a gain by definition. The report is now a best-effort **estimate** ("~5g moved while unmonitored") framed as corroboration for the authoritative "played without addon" signal, rather than a to-the-copper, per-item accusation.
+- **Clean slate on upgrade.** The first login after updating wipes the old wealth records and re-baselines fresh, so any phantom flag left over from the older versions clears itself with no officer action. (A genuinely un-forgiven flag from before the upgrade is also cleared — these are best-effort signals and the member is re-evaluated going forward.)
+
+- **The wealth Audit window now lists every gained item.** It previously showed a "…and N more item(s) not individually listed" line that was miscomputed — it subtracted the number of item *types* shown from the total item *quantity*, so gaining a stack (e.g. 10 Rough Stone) claimed 9 nonexistent unlisted items. That line is gone, and the distinct-item list is no longer truncated to 10 — the full set is reported. (Per-item quantities aren't itemised; the header shows the total count and each row is one gained item type.)
+
+### Notes
+- The wealth Audit window now shows the unmonitored play time and an estimated value moved, plainly marked best-effort, instead of an itemised list. Mixed-version guilds still work: a member on an older build is shown their old-style itemised report, and their flag is still visible to updated officers.
+- Nothing else about enforcement changes; this only affects the Guild Found off-radar wealth signal.
+
+---
+
 ## [0.7.8] - 2026-07-12
 
 ### Fixed
