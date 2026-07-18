@@ -48,6 +48,14 @@ local RECONCILE_WINDOW = 8
 -- /played value (db.char.playtime.observed).
 local anchorServer   -- server /played at the last TIME_PLAYED_MSG this session
 local anchorLocal    -- GetTime() at that instant
+-- GetTime() when this addon finished loading. The first /played read happens
+-- RECONCILE_WINDOW+jitter (8-11s) AFTER we loaded, and the character is IN-WORLD for all of
+-- it, so raw (serverNow - observed) over-reports the addon-off gap by that much on EVERY
+-- login. That time was monitored — we were loaded for it — so it must be subtracted before
+-- the gap is compared to either tolerance. Without this the 5s WEALTH_TOLERANCE sits below
+-- the measurement floor and every clean login folds a wealth diff. Session-only, never
+-- persisted (GetTime resets on client restart).
+local loadedAt
 
 local function pt()
     return Addon.db.char.playtime
@@ -86,13 +94,20 @@ end
 -- any value the guild reconciled for us (a member on an alternate PC), capped at our
 -- real /played so a forged peer value can never baseline us beyond what we've played.
 -- Everything /played grew beyond that base happened with the addon NOT loaded ANYWHERE.
-local function attributeLogin(serverNow)
+-- `readAt` is GetTime() at the instant `serverNow` was read (not necessarily now — an early
+-- unsolicited TIME_PLAYED_MSG is stashed and attributed when the reconcile window closes).
+local function attributeLogin(serverNow, readAt)
     local p = pt()
     local base = p.observed
     if Playtime._reconciledOb then
         base = math.max(base, math.min(Playtime._reconciledOb, serverNow))
     end
-    local gap = serverNow - base
+    -- Discount the in-world time we were already loaded for (see `loadedAt`). We load a moment
+    -- BEFORE world entry, so this can slightly over-subtract — erring toward missing a gap
+    -- rather than inventing one, the standing trade-off everywhere in this module.
+    local monitored = 0
+    if loadedAt then monitored = math.max(0, (readAt or GetTime()) - loadedAt) end
+    local gap = math.max(0, (serverNow - base) - monitored)
     local added = gap > TOLERANCE
     if added then
         p.unobserved = (p.unobserved or 0) + gap
@@ -102,6 +117,7 @@ local function attributeLogin(serverNow)
     anchorLocal  = GetTime()
     Playtime._reconciledOb  = nil
     Playtime._pendingServer = nil
+    Playtime._pendingAt     = nil
     -- The first status ping fires (6-14s in) BEFORE this attribution completes
     -- (the reconcile window holds it ~15-20s), so that ping reported up=0 and the
     -- member reads "compliant". Push a fresh ping the moment a login gap is found so
@@ -124,6 +140,7 @@ end
 -- Lifecycle
 -- ---------------------------------------------------------------------------
 function Playtime:OnEnable()
+    loadedAt = GetTime()
     installSuppression()
     self:RegisterEvent("TIME_PLAYED_MSG", "OnTimePlayed")
     self:RegisterEvent("PLAYER_LOGOUT", "AdvanceObserved")
@@ -143,7 +160,7 @@ end
 function Playtime:FinishReconcile()
     self._reconcileDone = true
     if self._pendingServer then
-        attributeLogin(self._pendingServer)
+        attributeLogin(self._pendingServer, self._pendingAt)
     else
         requestPlayed()
     end
@@ -170,9 +187,10 @@ function Playtime:OnTimePlayed(_, totalTime)
         -- shared high-water first; an early/unsolicited message is stashed for it.
         if not self._reconcileDone then
             self._pendingServer = serverNow
+            self._pendingAt     = GetTime()   -- when this value was read, for the monitored-time discount
             return
         end
-        attributeLogin(serverNow)
+        attributeLogin(serverNow, GetTime())
     else
         -- In-session refresh (a forgive re-request, or the player typed /played):
         -- re-anchor to the authoritative value, never add a gap.

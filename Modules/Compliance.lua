@@ -239,7 +239,9 @@ function Compliance:Record(sender, data)
         -- rather than the old false-precision "+5g 11s 13c, 3 item(s)". A pre-0.7.9 member sends
         -- no `wv`; fall back to their legacy wm/wq so a mixed-version officer still sees the flag.
         if data.wv ~= nil then
-            if (data.wv or 0) > 0 then
+            -- Floored at ns.WEALTH_VALUE_FLOOR (1g): below that the estimate is noise. See
+            -- Addon:WealthValueReportable.
+            if Addon:WealthValueReportable(data.wv) then
                 reasons[#reasons + 1] = "Guild Found: " .. fmtApprox(data.wv) .. " moved while unmonitored (est.)"
             end
         else
@@ -393,7 +395,7 @@ function Compliance:HasWealthGap(name)
     local info = self.roster[rosterKey(self, name)]
     if not info then return false end
     -- 0.7.9+ uses the value scalar; fall back to legacy money/item fields for a mixed-version member.
-    if info.wealthValue ~= nil then return info.wealthValue > 0 end
+    if info.wealthValue ~= nil then return Addon:WealthValueReportable(info.wealthValue) end
     return (info.wealthMoney or 0) ~= 0 or (info.wealthItems or 0) > 0
 end
 

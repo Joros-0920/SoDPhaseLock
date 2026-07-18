@@ -338,6 +338,24 @@ function Addon:WealthIntegrityOn()
     return self:GuildFoundAny() and (self:GetRuleset().guildFound.integrity ~= false)
 end
 
+-- Minimum estimated value (copper) before an unmonitored-wealth figure is worth an officer's
+-- attention. `wv` is an ESTIMATE built from vendor sell prices (unknown/uncached items count 0),
+-- so the low end of its range is noise, not signal — a stray copper of quest/vendor income
+-- caught at a session boundary is not evidence of an outside trade, and reporting it as one
+-- ("~16c moved while unmonitored") burns officer trust in the whole check.
+--
+-- Applied to the CUMULATIVE counter at REPORT time, never to an individual fold: repeated small
+-- gains still accrue and cross the floor, so this suppresses noise without creating a free
+-- allowance a member could drip value through. Receiver-side, so the floor an officer sees is
+-- their own client's — a member can't lower it, and it needs no wire field.
+ns.WEALTH_VALUE_FLOOR = 10000   -- 1g
+
+-- Is this member's estimated unmonitored value worth reporting? Single predicate so the roster
+-- reason text and the Clear-button gate can never disagree about who is flagged.
+function Addon:WealthValueReportable(wv)
+    return (wv or 0) >= ns.WEALTH_VALUE_FLOOR
+end
+
 -- Adopt an authoritative guildFound table into our active ruleset bucket. Shared by
 -- ApplyRuleset (normal apply) and Comm's equal-epoch reconcile (a member parked at
 -- the current epoch with stale/default Guild Found — an old-client relay that stripped
@@ -584,6 +602,9 @@ function Addon:HandleSlash(input)
         local value = integrity and integrity:GetUnaccountedValue() or 0
         self:Print(string.format("  estimated value gained while off: %s  (best-effort; vendor sell price, unknown items count 0)",
             (value ~= 0) and GetCoinTextureString(value) or "none"))
+        self:Print(string.format("  reported to officers: %s  (floor %s)",
+            self:WealthValueReportable(value) and "|cffff3030yes|r" or "|cff00ff00no — under the floor|r",
+            GetCoinTextureString(ns.WEALTH_VALUE_FLOOR)))
     else
         if ns.OpenOptions then ns.OpenOptions() end
     end

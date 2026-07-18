@@ -113,8 +113,18 @@ local function ShowAudit(playerName, isRetry)
     if info.wealthValue ~= nil then
         -- 0.7.9+ value scalar.
         local val = info.wealthValue or 0
-        addNoteInline(scroll, "\n|cffffd100Estimated value moved while addon off:|r "
-            .. ((val > 0) and ("+ " .. (GetCoinTextureString and GetCoinTextureString(val) or (val .. "c"))) or "|cff808080none|r"))
+        -- Show the real figure even when it's under the reporting floor (this is the diagnostic
+        -- view), but label it so an officer isn't left wondering why the row reads compliant.
+        local shown = (val > 0)
+            and ("+ " .. (GetCoinTextureString and GetCoinTextureString(val) or (val .. "c")))
+            or "|cff808080none|r"
+        if val > 0 and not Addon:WealthValueReportable(val) then
+            shown = shown .. " |cff808080(below the "
+                .. (GetCoinTextureString and GetCoinTextureString(ns.WEALTH_VALUE_FLOOR)
+                    or (ns.WEALTH_VALUE_FLOOR .. "c"))
+                .. " reporting threshold — not flagged)|r"
+        end
+        addNoteInline(scroll, "\n|cffffd100Estimated value moved while addon off:|r " .. shown)
         addNoteInline(scroll, "\n|cff808080Best-effort estimate from vendor sell prices; unknown items count as 0, and"
             .. " gains equal in value to bank/mail contents are conservatively not counted. This is a signal that"
             .. " the member acquired value while unmonitored — corroboration for the /played gap above, not proof of"

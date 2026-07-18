@@ -196,12 +196,41 @@ function Integrity:OnEnable()
     self:RegisterEvent("MAIL_SHOW", "OnMailShow")
     self:RegisterEvent("MAIL_INBOX_UPDATE", "OnMailInbox")
     self:RegisterEvent("MAIL_CLOSED", "OnMailClosed")
+    -- Latch login-instant wealth as early as it can be trusted. Between OnEnable and the fold
+    -- (attribution at ~8-11s, plus up to ~10s of FoldWhenReady retries) `_ready` is false, so
+    -- steady-state tracking is deaf — anything the player legitimately earns in those ~20s would
+    -- otherwise read as a delta against the pre-gap baseline and fold in as unmonitored value.
+    -- Sampling early bounds that blind window to the first second or two.
+    self._loginMoney, self._loginCarried = nil, nil
+    self:SampleLogin(0)
     -- Safety net: if Playtime never attributes a login, still take a baseline so steady-state
     -- tracking and the logout flush work. Must clear Playtime's ~8-11s reconcile window PLUS this
     -- module's own value-fold retry (FoldWhenReady, up to ~10s from attribution), so it can't
     -- overwrite the pre-gap baseline before a real fold finishes — 25s leaves a margin over the
     -- ~21s worst case. (Only fires when attribution never happens; a normal fold flips _ready first.)
     self:ScheduleTimer("ForceReady", 25)
+end
+
+-- Poll the login-instant wealth until both halves latch (or we run out of attempts). Money
+-- latches on the first POSITIVE read (0 is the signature of an unread GetMoney at login — the
+-- 0.7.4 guard); carried latches on the first loaded+fully-resolved scan. Each latches
+-- independently, and neither is ever overwritten once set.
+local SAMPLE_DELAY, SAMPLE_MAX = 0.5, 24   -- ~12s, comfortably past the fold's own retry budget
+
+function Integrity:SampleLogin(attempt)
+    if self._ready then return end
+    if self._loginMoney == nil then
+        local m = (GetMoney and GetMoney()) or 0
+        if m > 0 then self._loginMoney = m end
+    end
+    if self._loginCarried == nil then
+        local val, resolved = valueOf(carriedCounts())
+        if bagsLoaded() and resolved then self._loginCarried = val end
+    end
+    if self._loginMoney ~= nil and self._loginCarried ~= nil then return end
+    if attempt < SAMPLE_MAX then
+        self:ScheduleTimer(function() self:SampleLogin(attempt + 1) end, SAMPLE_DELAY)
+    end
 end
 
 function Integrity:ForceReady()
@@ -251,9 +280,13 @@ function Integrity:FoldWhenReady(attempt)
     local baseReady = (w.vCarried ~= nil) and (w.money ~= nil and w.money > 0)
     if baseReady and stable then
         self._prevVal = nil
-        local moneyNow     = (GetMoney and GetMoney()) or 0
-        local moneyDelta   = moneyNow - w.money
-        local carriedDelta = curVal - w.vCarried
+        local moneyNow = (GetMoney and GetMoney()) or 0
+        -- Diff the LOGIN-INSTANT wealth against the pre-gap baseline, not the wealth as it
+        -- stands now: everything earned between login and this fold was played with the addon
+        -- loaded and must not be attributed to the unmonitored window. Fall back to the current
+        -- reading only if the early sample never latched.
+        local moneyDelta   = (self._loginMoney or moneyNow) - w.money
+        local carriedDelta = (self._loginCarried or curVal) - w.vCarried
         -- Net rise in the login-visible buckets. A vendor buy (money down, items up) or an
         -- ordinary spend nets toward zero, so it doesn't over-flag; only a genuine net increase
         -- in what the player holds counts.
@@ -403,6 +436,11 @@ function Integrity:Rebaseline()
     w.unaccountedValue = 0
     w.unaccountedMoney = 0
     snapshotNow(w)
+    -- A forgive that lands mid-login (before attribution) must also cancel the pending fold:
+    -- its latched pre-gap deltas are exactly what was just forgiven, and re-folding them would
+    -- immediately re-flag the member. Baseline is now; steady-state tracking starts here.
+    self._loginMoney, self._loginCarried, self._prevVal = nil, nil, nil
+    self._ready = true
     -- Refresh the credit-source baselines only if their frame is open right now.
     if self._bankOpen then
         local counts = bankCounts()

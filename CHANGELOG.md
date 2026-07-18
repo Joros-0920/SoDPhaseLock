@@ -4,6 +4,18 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.11] - 2026-07-18
+
+### Fixed
+- **The Guild Found wealth check no longer fires on every ordinary login.** The addon-off "gap" was measured as the growth in server `/played` since last logout — but the `/played` reading is taken 8-11 seconds *after* you log in, while you're already in the world. Every clean login therefore measured a ~11-15 second gap with no addon-off time at all. The played flag's 180s tolerance absorbed that; the wealth check's 5s tolerance did not, so the wealth comparison ran on **100% of logins**. The gap now discounts the time the addon was already loaded, so a login with no addon-off period measures ~0.
+- **Wealth is now compared as it stood at login, not ~20 seconds later.** Between login and the comparison finishing, wealth tracking is deliberately paused so it can't overwrite the pre-gap baseline — which meant anything you legitimately earned in that window (a vendored grey, a quest reward, a mail take) was diffed against the pre-logout baseline and reported as value "moved while unmonitored." Together with the fix above, this was the source of small phantom flags like "~16c moved while unmonitored." Login wealth is now sampled as early as it can be trusted and used for the comparison.
+- **An officer forgive during login now cancels the pending wealth comparison** instead of letting it immediately re-flag the member with the amount that was just forgiven.
+
+### Changed
+- **Unmonitored wealth under 1 gold is no longer reported.** The figure is an estimate built from vendor sell prices, so its low end is noise rather than evidence of an outside trade — a few copper caught at a session boundary isn't worth an officer's attention. This is a floor on the running total at report time, not per-login, so repeated small gains still add up and cross it; it isn't an allowance to drip value through. The audit window still shows the exact figure, marked as below the threshold, and `/sodlock wealth` tells you whether your own total is being reported.
+
+---
+
 ## [0.7.10] - 2026-07-17
 
 ### Fixed
