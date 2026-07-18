@@ -83,7 +83,28 @@ function Enforcement:OnEnable()
             return origBuy(index, ...)
         end
     end
-    self:ScheduleTimer("FullScan", 2)
+    self:ScheduleTimer("LoginScan", 2)
+end
+
+-- Seconds between guild-context readiness re-checks, and how long to wait before
+-- scanning anyway (a roster that never lands must not disable enforcement forever).
+local LOGIN_SCAN_RETRY   = 1
+local LOGIN_SCAN_TIMEOUT = 30
+
+-- First scan of the session. Deferred until the guild context resolves: until then
+-- Addon:GuildKey() reads the guildless "" bucket, whose ruleset is the unsynced
+-- default (phase 1, epoch 0). Guild enforce flags are all off there, but personal
+-- challenges are profile-scoped and RuleEnabled ORs them in regardless of guild — so
+-- scanning early flags an authentic player's whole kit against phase 1 until the real
+-- ruleset arrives. Addon:OnGuildChanged runs its own FullScan the moment the key
+-- resolves; this path covers the genuinely guildless case and the timeout fallback.
+function Enforcement:LoginScan(waited)
+    waited = waited or 0
+    if not Addon:GuildContextReady() and waited < LOGIN_SCAN_TIMEOUT then
+        self:ScheduleTimer("LoginScan", LOGIN_SCAN_RETRY, waited + LOGIN_SCAN_RETRY)
+        return
+    end
+    self:FullScan()
 end
 
 -- XP gain enabled/disabled at the NPC; report the new state immediately.

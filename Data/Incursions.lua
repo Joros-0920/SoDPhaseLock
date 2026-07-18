@@ -17,8 +17,9 @@ local ADDON, ns = ...
 -- =========================================================================
 
 ns.IncursionDrops = {
-    [1] = { 224006, 221193, 221369 },
+    [1] = { 221369, 224004, 224005 },
     [2] = { 221374 },
+    [3] = { 221193, 224006 },
 }
 
 -- Reconcile bannedItems against the correct phase: ban each item in every phase

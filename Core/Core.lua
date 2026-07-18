@@ -222,9 +222,13 @@ function Addon:OnEnable()
     elseif GuildRoster then
         GuildRoster()
     end
-    self:RegisterEvent("GUILD_ROSTER_UPDATE", function()
-        -- nothing to cache eagerly; rank lookups read the roster on demand
-    end)
+    -- GetGuildInfo("player") is routinely nil for seconds after login/reload, so the
+    -- cache above may have parked us on the guildless "" bucket. PLAYER_GUILD_UPDATE
+    -- alone is not enough to correct that — it fires on an actual guild change, not
+    -- reliably at login. GUILD_ROSTER_UPDATE is what lands once the roster arrives, so
+    -- re-resolve there too. It fires in bursts (one per roster page); OnGuildChanged
+    -- early-returns on an unchanged key, so the repeats cost one GetGuildInfo each.
+    self:RegisterEvent("GUILD_ROSTER_UPDATE", "OnGuildChanged")
 
     -- Joining/leaving/changing guild mid-session switches which bucket is active.
     self:RegisterEvent("PLAYER_GUILD_UPDATE", "OnGuildChanged")
@@ -267,6 +271,15 @@ function Addon:OnGuildChanged()
     -- instead of a full status interval (60-300s) later.
     if comm and comm.SendStatus then comm:SendStatus() end
     if ns.RefreshRoster then ns.RefreshRoster() end
+end
+
+-- Has the guild context settled enough to trust GuildKey()? A guilded character whose
+-- GetGuildInfo has not resolved yet reads as guildless, which silently selects the ""
+-- bucket — an unsynced ruleset (default phase, epoch 0). Callers that would act on the
+-- ruleset at login (enforcement scans) must wait for this rather than flag against a
+-- bucket that is about to change underneath them.
+function Addon:GuildContextReady()
+    return (not IsInGuild()) or (GetGuildInfo("player") ~= nil)
 end
 
 function Addon:GetRuleset()       return self.db.global.rulesets[self:GuildKey()] end
