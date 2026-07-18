@@ -4,6 +4,14 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.10] - 2026-07-17
+
+### Fixed
+- **Nightmare Incursion items now unlock at the correct phase.** Fix incorrect item ids for Nightmare Incursions
+- **Enforcement no longer briefly flags your whole kit against Phase 1 at login.** `GetGuildInfo("player")` is routinely nil for a few seconds after login/`/reload`, which parked the addon on the guildless (unsynced, Phase 1) ruleset; a personal-challenge player could then have their entire set scanned against Phase 1 before the real guild ruleset arrived. The first scan of a session now waits until your guild context has actually resolved (re-checking each second, with a 30s fallback so a roster that never lands can't disable enforcement), and the guild bucket is re-resolved on `GUILD_ROSTER_UPDATE` as well.
+
+---
+
 ## [0.7.9] - 2026-07-14
 
 ### Changed
