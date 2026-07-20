@@ -4,15 +4,21 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.12] - 2026-07-19
+
+### Fixed
+- **Level 60 characters are no longer flagged against a phase nobody set.** Until an officer's ruleset actually reached you, the addon fell back on the placeholder default of Phase 1 and judged you against its level-25 cap — so a 60 logging in saw a wall of "not available at the current phase" alerts and red bag markers. Nothing is enforced now until a phase has genuinely been set: for guild members, when the officer's ruleset syncs to you; if you're guildless, when you pick an Active phase yourself in `/sodlock`. `/sodlock status` says which of those it's waiting on.
+- **Equipped-gear and bag-overlay checks no longer run with every rule switched off.** Both fell through to a bare "required level exceeds the phase cap" test that was never gated on any rule, so they fired even on an install with nothing enabled. That test is the level-cap rule applied to an item, and it now honours the level rule like everything else.
+- **The welcome window's mode choice no longer looks like it did nothing.** Picking Relaxed or Authentic as a non-leader saves your challenges immediately, but they can't take effect before a phase exists; it now tells you that instead of silently waiting.
+
+---
+
 ## [0.7.11] - 2026-07-18
 
 ### Fixed
 - **The Guild Found wealth check no longer fires on every ordinary login.** The addon-off "gap" was measured as the growth in server `/played` since last logout — but the `/played` reading is taken 8-11 seconds *after* you log in, while you're already in the world. Every clean login therefore measured a ~11-15 second gap with no addon-off time at all. The played flag's 180s tolerance absorbed that; the wealth check's 5s tolerance did not, so the wealth comparison ran on **100% of logins**. The gap now discounts the time the addon was already loaded, so a login with no addon-off period measures ~0.
 - **Wealth is now compared as it stood at login, not ~20 seconds later.** Between login and the comparison finishing, wealth tracking is deliberately paused so it can't overwrite the pre-gap baseline — which meant anything you legitimately earned in that window (a vendored grey, a quest reward, a mail take) was diffed against the pre-logout baseline and reported as value "moved while unmonitored." Together with the fix above, this was the source of small phantom flags like "~16c moved while unmonitored." Login wealth is now sampled as early as it can be trusted and used for the comparison.
 - **An officer forgive during login now cancels the pending wealth comparison** instead of letting it immediately re-flag the member with the amount that was just forgiven.
-
-### Changed
-- **Unmonitored wealth under 1 gold is no longer reported.** The figure is an estimate built from vendor sell prices, so its low end is noise rather than evidence of an outside trade — a few copper caught at a session boundary isn't worth an officer's attention. This is a floor on the running total at report time, not per-login, so repeated small gains still add up and cross it; it isn't an allowance to drip value through. The audit window still shows the exact figure, marked as below the threshold, and `/sodlock wealth` tells you whether your own total is being reported.
 
 ---
 

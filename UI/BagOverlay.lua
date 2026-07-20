@@ -134,7 +134,11 @@ local function isBagViolation(itemID)
     if Addon:RuleEnabled("gear") then
         return ns.ItemViolatesPhase(itemID, phase)
     else
-        -- Gear rule off: only flag items whose required level exceeds the phase cap.
+        -- Gear rule off: only flag items whose required level exceeds the phase cap —
+        -- and only when the level rule is actually on. This mirrors the same fallback
+        -- in Enforcement's itemViolatesInMode; keep the two in step or the overlay and
+        -- the violation log disagree about what counts.
+        if not Addon:RuleEnabled("level") then return false end
         local reqLevel = select(5, GetItemInfo(itemID))
         return reqLevel ~= nil and reqLevel > phase.levelCap
     end

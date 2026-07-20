@@ -282,6 +282,19 @@ function Addon:GuildContextReady()
     return (not IsInGuild()) or (GetGuildInfo("player") ~= nil)
 end
 
+-- Is there a phase to enforce AGAINST yet? epoch 0 means nobody has ever set one:
+-- the bucket holds the default (phase 1), which is a placeholder, not a decision. A
+-- guilded member whose ruleset has not yet arrived, and a guildless player who has
+-- not picked a phase in the options panel, both sit there — and personal challenges
+-- are profile-scoped, so RuleEnabled would otherwise enforce them against phase 1
+-- and flag a level 60's entire kit. Also false while the guild context is unresolved
+-- (a guilded character reads as guildless for seconds after login and would be judged
+-- by the "" bucket). Any officer/self phase pick bumps the epoch, so choosing phase 1
+-- deliberately still counts as known.
+function Addon:RulesetKnown()
+    return self:GuildContextReady() and (self:GetRuleset().epoch or 0) > 0
+end
+
 function Addon:GetRuleset()       return self.db.global.rulesets[self:GuildKey()] end
 function Addon:GetActivePhase()   return self:GetRuleset().phase end
 -- "mode" is DERIVED from which rules are enabled, not a stored field: a player is
@@ -295,6 +308,9 @@ function Addon:GetPhaseData()     return ns.Phases[self:GetRuleset().phase] end
 -- Guild-controlled enforcement config (read by Enforcement / BagOverlay).
 -- Personal challenges are ORed in: a player can add restrictions, never remove them.
 function Addon:RuleEnabled(rule)
+    -- No phase has been set for this context yet — enforce nothing rather than judge
+    -- the player against the placeholder default. See RulesetKnown.
+    if not self:RulesetKnown() then return false end
     return self:GetRuleset().enforce[rule]
         or (self.db.profile.personalChallenges[rule] == true)
 end
@@ -522,6 +538,17 @@ function Addon:HandleSlash(input)
         self:Print(string.format("Mode |cff00ff00%s|r | %s | level cap %d | set by %s (epoch %d)",
             self:GetMode(), data and data.name or "?", data and data.levelCap or 0, r.setBy ~= "" and r.setBy or "—", r.epoch))
         self:Print(self:IsOfficer() and "You are an officer (can set the phase)." or "You are a member (read-only).")
+        if not self:RulesetKnown() then
+            -- Nothing is being enforced right now; say so plainly and say why, so a
+            -- player seeing no restrictions doesn't read it as the addon being broken.
+            if not self:GuildContextReady() then
+                self:Print("|cffffd100Guild not resolved yet|r — enforcement is paused for a few seconds after login.")
+            elseif IsInGuild() then
+                self:Print("|cffffd100No phase set yet|r — nothing is enforced until an officer sets the phase and it syncs to you.")
+            else
+                self:Print("|cffffd100No phase set yet|r — you are guildless, so pick an Active phase in |cff00ff00/sodlock|r to start enforcing.")
+            end
+        end
         local comm = self:GetModule("Comm", true)
         local newer = comm and comm:NewerVersion()
         if newer then

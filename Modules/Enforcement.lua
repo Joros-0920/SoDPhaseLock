@@ -255,6 +255,11 @@ local function itemViolatesInMode(itemID, phase)
     if enabled("gear") then
         return itemViolation(itemID, phase)
     end
+    -- Gear rule off: the only thing left is "your level cap can't use this", which is
+    -- the LEVEL rule applied to an item — so it must honour that rule rather than run
+    -- unconditionally. Ungated, a level 60 on a phase-1 cap had every item flagged even
+    -- with no rule enabled at all.
+    if not enabled("level") then return false end
     local reqLevel = select(5, GetItemInfo(itemID))
     return reqLevel ~= nil and reqLevel > phase.levelCap
 end
@@ -393,9 +398,16 @@ local function enchantViolationPhase(slot, activePhase)
 end
 
 function Enforcement:CheckGear()
-    if not Addon.db.profile.enabled then
+    -- No gear-relevant rule on (or no phase set yet) → nothing to say about the kit.
+    -- Zero the counts rather than leaving stale ones behind for the roster to report.
+    if not (Addon.db.profile.enabled
+            and (enabled("gear") or enabled("rune") or enabled("level"))) then
         self.violations.gear = 0
         self.violations.enchant = 0
+        -- Drop this half of the rune result too, then recombine — otherwise a relic
+        -- flagged before the rules went off stays latched in violations.rune.
+        self._runeRelicViol  = false
+        self.violations.rune = self._engraveRuneViol or false
         return
     end
     local phase = P()

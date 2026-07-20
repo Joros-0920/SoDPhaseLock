@@ -35,6 +35,18 @@ local function applyMode(mode, frame)
         local e = Addon:GetModule("Enforcement", true)
         if e then e:FullScan() end
         if ns.RefreshOptions then ns.RefreshOptions() end
+        -- Personal challenges are live immediately, but there may be no phase to
+        -- enforce against yet (no officer broadcast received / guildless and no phase
+        -- picked). RuleEnabled holds everything off until then; without a word here a
+        -- level 60 either sees nothing happen, or — once the phase lands — a sudden
+        -- wall of violations. Say which it is.
+        if not Addon:RulesetKnown() then
+            if IsInGuild() then
+                Addon:Print("Your challenges are saved. Nothing is enforced yet — they start once an officer sets the guild's phase.")
+            else
+                Addon:Print("Your challenges are saved. Nothing is enforced yet — pick an Active phase in |cff00ff00/sodlock|r to start.")
+            end
+        end
     end
     frame:Hide()
     welcomeFrame = nil
