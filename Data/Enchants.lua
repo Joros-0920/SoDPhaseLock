@@ -112,6 +112,7 @@ ns.PhaseEnchants = {
             { 13644, "Enchant Boots - Lesser Stamina" },
             { 13687, "Enchant Boots - Lesser Spirit" },
             { 13836, "Enchant Boots - Stamina" },
+            { 13890, "Enchant Boots - Minor Speed" },
         } },
         { label = "Shield", items = {
             { 13631, "Enchant Shield - Lesser Stamina" },
@@ -173,7 +174,6 @@ ns.PhaseEnchants = {
             { 25080, "Enchant Gloves - Superior Agility" },
         } },
         { label = "Boots", items = {
-            { 13890, "Enchant Boots - Minor Speed" },
             { 13935, "Enchant Boots - Agility" },
             { 20020, "Enchant Boots - Greater Stamina" },
             { 20023, "Enchant Boots - Greater Agility" },
