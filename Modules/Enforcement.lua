@@ -155,8 +155,10 @@ local function inLockedInstance()
     if not inInstance or (instanceType ~= "party" and instanceType ~= "raid") then
         return false
     end
+    -- instanceID (8th return) is locale-independent; name is the enUS-only fallback.
     local name = GetInstanceInfo()
-    if ns.IsInstanceAllowed(Addon:GetActivePhase(), name) then return false end
+    local instanceID = select(8, GetInstanceInfo())
+    if ns.IsInstanceAllowed(Addon:GetActivePhase(), instanceID, name) then return false end
     return true, name
 end
 
@@ -291,7 +293,13 @@ end
 -- Built lazily from ns.PhaseEnchants (the same data the Available Enchants tab
 -- uses). Powers the tooltip fallback below, which phase-checks an enchant by NAME
 -- when it isn't visible in item-link field 2.
-local enchantPhaseByName
+--
+-- LOCALE-SAFE: the display names in ns.PhaseEnchants are enUS, but each entry also
+-- carries the enchant SPELL ID, and GetSpellInfo returns that spell's name in the
+-- CLIENT's language — so we key the map on the localized name (which matches the
+-- localized tooltip green line) and keep the enUS name as an extra key so enUS never
+-- regresses if the spell name isn't cached yet.
+local enchantPhaseByName, enchantMapComplete
 local function normalizeEnchName(s)
     if not s then return nil end
     s = s:gsub("^[Ee]nchanted:%s*", "")   -- some tooltips prefix the green line
@@ -300,26 +308,66 @@ local function normalizeEnchName(s)
     if s == "" then return nil end
     return s:lower()
 end
+
+-- Localized name of an enchant spell (C_Spell first for forward-compat, then the
+-- classic global). nil until the client has the spell cached — usually immediate.
+local function enchantSpellName(spellID)
+    if not spellID then return nil end
+    if C_Spell and C_Spell.GetSpellInfo then
+        local info = C_Spell.GetSpellInfo(spellID)
+        if info and info.name then return info.name end
+    end
+    if GetSpellInfo then return (GetSpellInfo(spellID)) end
+    return nil
+end
+
+-- Locale-agnostic strip of the "Enchant <Slot> - " prefix down to the short applied
+-- name (what the item's green enchant line shows). Take the text after the LAST " - "
+-- separator, which most locales preserve; if there's none, keep the whole string. This
+-- replaces the old enUS-only "^Enchant .- %- " match so a localized spell name reduces
+-- to the same short name the localized tooltip renders.
+local function stripEnchantPrefix(name)
+    return name:match("^.*%s%-%s(.+)$") or name
+end
+
+-- Returns the map plus a `complete` flag (false if any spell name wasn't cached yet, so
+-- the caller can retry later instead of caching a partial localized map).
 local function buildEnchantPhaseByName()
     local map = {}
+    local complete = true
     -- Ascending phase order so the EARLIEST occurrence wins (never over-flag a
     -- name that also exists at/earlier than the active phase).
+    local function add(name, phase)
+        local key = name and normalizeEnchName(stripEnchantPrefix(name))
+        if key and map[key] == nil then map[key] = phase end
+    end
     for phase = ns.MIN_PHASE or 1, ns.MAX_PHASE or 8 do
         local groups = ns.PhaseEnchants and ns.PhaseEnchants[phase]
         if groups then
             for _, group in ipairs(groups) do
                 for _, entry in ipairs(group.items or {}) do
-                    local name = entry[2]
-                    -- Strip the "Enchant <Slot> - " prefix down to the applied name
-                    -- (what the item tooltip's green line actually shows).
-                    local short = name and name:match("^[Ee]nchant .- %- (.+)$")
-                    local key = normalizeEnchName(short or name)
-                    if key and map[key] == nil then map[key] = phase end
+                    local spellID, enName = entry[1], entry[2]
+                    -- Locale-safe key: the client's own localized spell name (matches
+                    -- the localized tooltip green line).
+                    local localized = enchantSpellName(spellID)
+                    if not localized and spellID then complete = false end
+                    add(localized, phase)
+                    -- enUS data name as an always-present fallback key (identical to the
+                    -- localized key on an enUS client; harmless dead key elsewhere).
+                    add(enName, phase)
                 end
             end
         end
     end
-    return map
+    return map, complete
+end
+
+-- Build the localized name map, caching it only once every spell name has resolved so a
+-- partial map (built before the client cached some enchant spells) gets rebuilt later.
+local function ensureEnchantNameMap()
+    if enchantPhaseByName and enchantMapComplete then return enchantPhaseByName end
+    enchantPhaseByName, enchantMapComplete = buildEnchantPhaseByName()
+    return enchantPhaseByName
 end
 
 -- Fallback: read every green permanent-enchant line off the equipped item's
@@ -343,7 +391,7 @@ local function tooltipEnchantPhase(slot, runeName)
     enchScanTip:SetOwner(UIParent, "ANCHOR_NONE")
     enchScanTip:ClearLines()
     if not pcall(enchScanTip.SetInventoryItem, enchScanTip, "player", slot) then return nil end
-    enchantPhaseByName = enchantPhaseByName or buildEnchantPhaseByName()
+    local nameMap = ensureEnchantNameMap()
     local runeKey = normalizeEnchName(runeName)
     local latest
     for i = 2, enchScanTip:NumLines() do
@@ -356,7 +404,7 @@ local function tooltipEnchantPhase(slot, runeName)
                 -- Ignore the rune's own line — it isn't an enchant even when its
                 -- name collides with one in our data.
                 if key and key ~= runeKey then
-                    local phase = enchantPhaseByName[key]
+                    local phase = nameMap[key]
                     if phase and (not latest or phase > latest) then latest = phase end
                 end
             end

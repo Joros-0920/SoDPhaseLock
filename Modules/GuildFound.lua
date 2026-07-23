@@ -34,11 +34,63 @@ local function isGuildmate(name)
     return Addon:GetGuildRankIndex(name) ~= nil
 end
 
+-- Turn a localized format-string global (e.g. BIND_TRADE_TIME_REMAINING, an
+-- AUCTION_*_MAIL_SUBJECT) into a Lua search pattern: escape the pattern-magic chars and
+-- turn each format specifier (%s, %d, positional %1$s, ...) into a wildcard. Matching the
+-- result against localized game text is then locale-correct on ANY client, because the
+-- pattern is derived from the same localized global the client rendered the text from.
+-- This is the project's canonical way to read game strings — never hardcode enUS literals.
+local function globalStringPattern(fmt)
+    if type(fmt) ~= "string" then return nil end
+    return fmt
+        :gsub("%%[%d%$]*%a", "\1")                    -- format specifiers -> sentinel
+        :gsub("[%^%$%(%)%.%[%]%*%+%-%?%%]", "%%%0")    -- escape pattern magic
+        :gsub("\1", ".-")                             -- sentinel -> wildcard
+end
+
+-- Is the inbox mail at `index` Auction House mail? Always blocked when the mail rule is
+-- active (sale proceeds, won auctions, outbid/expired/cancelled returns) — with the AH
+-- disabled we never want any path to open AH mail. The sender NAME is localized free text
+-- ("Alliance Auction House" enUS, "Auktionshaus" deDE, ...), so a literal match only works
+-- on enUS. Detect it locale-independently instead:
+--   1. GetInboxInvoiceInfo returns a non-nil invoiceType for buyer/seller AH mail
+--      (sold & won) — pure data, no locale involved.
+--   2. The rest (expired / outbid / cancelled) is matched by subject against the
+--      AUCTION_*_MAIL_SUBJECT globals, which ARE localized, so patterns built from them
+--      match on any client.
+--   3. enUS sender literal as a last-resort fallback (covers a build missing the globals).
+local ahSubjectPatterns
+local function auctionSubjectPatterns()
+    if ahSubjectPatterns then return ahSubjectPatterns end
+    ahSubjectPatterns = {}
+    for _, g in ipairs({
+        "AUCTION_SOLD_MAIL_SUBJECT", "AUCTION_EXPIRED_MAIL_SUBJECT",
+        "AUCTION_OUTBID_MAIL_SUBJECT", "AUCTION_WON_MAIL_SUBJECT",
+        "AUCTION_REMOVED_MAIL_SUBJECT",
+    }) do
+        local pat = globalStringPattern(_G[g])
+        if pat then ahSubjectPatterns[#ahSubjectPatterns + 1] = "^" .. pat end
+    end
+    return ahSubjectPatterns
+end
+
+local function isAuctionHouseMail(index)
+    if GetInboxInvoiceInfo then
+        local invoiceType = GetInboxInvoiceInfo(index)
+        if invoiceType and invoiceType ~= "" then return true end
+    end
+    local _, _, sender, subject = GetInboxHeaderInfo(index)
+    if subject then
+        for _, pat in ipairs(auctionSubjectPatterns()) do
+            if subject:find(pat) then return true end
+        end
+    end
+    if sender and sender:find("Auction House", 1, true) then return true end  -- enUS fallback
+    return false
+end
+
 -- Is the inbox mail at `index` blocked by the closed-economy rule?
---   * Auction House mail (proceeds, won auctions, outbid/expired refunds) is ALWAYS
---     blocked when the mail rule is active — with the AH disabled we never want any
---     path to open AH mail. Matched on "Auction House" in the sender name ("Alliance/
---     Horde/Neutral Auction House"); locale-fragile (enUS), like other name matches.
+--   * Auction House mail is ALWAYS blocked when the rule is active (see above).
 --   * Otherwise only player-to-player mail from a non-guildmate is blocked. Ordinary
 --     NPC/system/quest mail is exempt: some of it carries a sender name (quest rewards,
 --     vendor buyback), so a name check alone would wrongly trap it. GetInboxHeaderInfo's
@@ -46,8 +98,8 @@ end
 --     player-vs-NPC discriminator.
 local function mailFromOutsider(index)
     if not index then return false end
+    if isAuctionHouseMail(index) then return true end
     local _, _, sender, _, _, _, _, _, _, _, _, canReply = GetInboxHeaderInfo(index)
-    if sender and sender:find("Auction House", 1, true) then return true end
     if not canReply then return false end
     return sender ~= nil and not isGuildmate(sender)
 end
@@ -108,16 +160,7 @@ end
 -- (SetTradePlayerItem/SetTradeTargetItem), not a hyperlink. Build a Lua pattern from the
 -- format string once: escape its magic chars, turn the %s placeholder into a wildcard,
 -- so the match is locale-correct.
-local bindTradePattern
-do
-    local fmt = BIND_TRADE_TIME_REMAINING
-    if type(fmt) == "string" then
-        bindTradePattern = fmt
-            :gsub("%%[%d%$]*%a", "\1")                    -- format specifiers -> sentinel
-            :gsub("[%^%$%(%)%.%[%]%*%+%-%?%%]", "%%%0")    -- escape pattern magic
-            :gsub("\1", ".-")                             -- sentinel -> wildcard
-    end
-end
+local bindTradePattern = globalStringPattern(BIND_TRADE_TIME_REMAINING)
 
 -- Is the item in trade slot `index` on `side` ("player"/"target") still tradeable via
 -- its group-loot window? Scans that slot's tooltip for the BIND_TRADE line.
@@ -227,6 +270,30 @@ function GuildFound:OnEnable()
     -- A partner's item may resolve asynchronously (uncached tooltip); when its data
     -- arrives, re-evaluate so a conjured item wrongly blocked in the meantime frees up.
     self:RegisterEvent("GET_ITEM_INFO_RECEIVED",     "OnItemInfoReceived")
+    -- TRADE_UPDATE is Blizzard's own generic trade refresh (it re-runs TradeFrame_Update
+    -- and re-enables the Trade button); mirror it so our block re-asserts on that path too.
+    self:RegisterEvent("TRADE_UPDATE",               "EvaluateTrade")
+
+    -- The player changing their OWN offered gold fires NO event we can register for:
+    -- TRADE_MONEY_CHANGED reflects only the *target's* money. Worse, Blizzard's
+    -- TradeFrame_UpdateMoney re-enables the Trade button whenever the entered amount is
+    -- affordable. So dropping gold on your side would leave the Trade button live with
+    -- gold in the window — appearing tradeable (the AcceptTrade backstop below still
+    -- blocks the actual accept, but the button must reflect the block). Post-hook the two
+    -- globals that change the player's offered gold — SetTradeMoney (the money box) and
+    -- AddTradeMoney (dragging gold onto the frame) — plus the button's own enable entry
+    -- point, to re-run EvaluateTrade with the now-current amount. EvaluateTrade toggles the
+    -- widget directly (btn:Enable/Disable), not these wrappers, so there is no recursion.
+    -- Hook-once; guard each global's existence per build.
+    if not self.tradeMoneyHooked then
+        self.tradeMoneyHooked = true
+        local function reeval() GuildFound:EvaluateTrade() end
+        if SetTradeMoney then hooksecurefunc("SetTradeMoney", reeval) end
+        if AddTradeMoney then hooksecurefunc("AddTradeMoney", reeval) end
+        if type(TradeFrameTradeButton_Enable) == "function" then
+            hooksecurefunc("TradeFrameTradeButton_Enable", reeval)
+        end
+    end
 
     -- Auction House: flat block — close it on open.
     for _, ev in ipairs({ "AUCTION_HOUSE_SHOW" }) do

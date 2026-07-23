@@ -25,14 +25,24 @@ local function commitGuild(msg)
 end
 
 -- ---- Overview helpers -----------------------------------------------------
+-- Display names for a phase's instanceUnlocks entries (each is `{ id, name }`).
+local function instanceNames(phase)
+    local names = {}
+    for _, entry in ipairs(phase.instanceUnlocks) do
+        names[#names + 1] = entry.name
+    end
+    return names
+end
+
 -- Ordered, de-duplicated list of every instance enterable up to `phaseIndex`
--- (original casing preserved; ns.Phases[*].allowedInstances is lowercased).
+-- (original casing preserved; ns.Phases[*].allowedInstances is keyed by ID).
 local function cumulativeInstances(phaseIndex)
     local list, seen = {}, {}
     for i = ns.MIN_PHASE, phaseIndex do
         local phase = ns.Phases[i]
         if phase then
-            for _, name in ipairs(phase.instanceUnlocks) do
+            for _, entry in ipairs(phase.instanceUnlocks) do
+                local name = entry.name
                 local key = name:lower()
                 if not seen[key] then
                     seen[key] = true
@@ -67,7 +77,7 @@ local function phaseSummaryText()
     if d.feature then lines[#lines + 1] = "|cffffd100New feature:|r " .. d.feature end
     lines[#lines + 1] = ""
     lines[#lines + 1] = "|cffffd100Newly unlocked this phase:|r"
-    lines[#lines + 1] = bulletList(d.instanceUnlocks, "ff40ff40")
+    lines[#lines + 1] = bulletList(instanceNames(d), "ff40ff40")
     lines[#lines + 1] = ""
     local allInstances = cumulativeInstances(idx)
     lines[#lines + 1] = string.format("|cffffd100All available instances (%d):|r", #allInstances)
@@ -90,7 +100,7 @@ local function nextPhaseSummaryText()
     if nx.event then out[#out + 1] = "|cffffd100New Event:|r " .. nx.event end
     if nx.feature then out[#out + 1] = "|cffffd100New feature:|r " .. nx.feature end
     out[#out + 1] = "|cffffd100New dungeons & raids:|r"
-    out[#out + 1] = bulletList(nx.instanceUnlocks, "ffffd100")
+    out[#out + 1] = bulletList(instanceNames(nx), "ffffd100")
     out[#out + 1] = string.format(
         "|cffffd100Raises level cap to|r |cff00ff00%d|r|cffffd100, profession cap to|r |cff00ff00%d|r.",
         nx.levelCap, nx.profCap)

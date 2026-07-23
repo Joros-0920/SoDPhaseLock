@@ -18,12 +18,12 @@ ns.Phases = {
         raid        = "Blackfathom Deeps",
         profCap     = 150,
         instanceUnlocks = {
-            "Ragefire Chasm",
-            "Wailing Caverns",
-            "The Deadmines",
-            "Shadowfang Keep",
-            "Blackfathom Deeps",
-            "The Stockade",
+            { id = 389, name = "Ragefire Chasm" },
+            { id = 43,  name = "Wailing Caverns" },
+            { id = 36,  name = "The Deadmines" },
+            { id = 33,  name = "Shadowfang Keep" },
+            { id = 48,  name = "Blackfathom Deeps" },
+            { id = 34,  name = "The Stockade" },
         },
         bannedItems = {
             [208222] = true,  -- Old Guard Retaliator
@@ -2316,10 +2316,10 @@ ns.Phases = {
         event       = "Blood Moon",
         profCap     = 225,
         instanceUnlocks = {
-            "Razorfen Kraul",
-            "Gnomeregan",
-            "Scarlet Monastery",
-            "Razorfen Downs",
+            { id = 47,  name = "Razorfen Kraul" },
+            { id = 90,  name = "Gnomeregan" },
+            { id = 189, name = "Scarlet Monastery" },
+            { id = 129, name = "Razorfen Downs" },
         },
         bannedItems = {
             [208222] = true,  -- Old Guard Retaliator
@@ -4373,10 +4373,10 @@ ns.Phases = {
         feature     = "Dual Spec",
         profCap     = 300,
         instanceUnlocks = {
-            "Uldaman",
-            "Zul'Farrak",
-            "Maraudon",
-            "The Temple of Atal'Hakkar",
+            { id = 70,  name = "Uldaman" },
+            { id = 209, name = "Zul'Farrak" },
+            { id = 349, name = "Maraudon" },
+            { id = 109, name = "The Temple of Atal'Hakkar" },
         },
         bannedItems = {
             [208222] = true,  -- Old Guard Retaliator
@@ -5927,14 +5927,16 @@ ns.Phases = {
         raid        = "Molten Core",
         profCap     = 300,
         instanceUnlocks = {
-            "Blackrock Depths",
-            "Lower Blackrock Spire",
-            "Upper Blackrock Spire",
-            "Dire Maul",
-            "Stratholme",
-            "Scholomance",
-            "Molten Core",
-            "Onyxia's Lair",
+            { id = 230, name = "Blackrock Depths" },
+            -- Lower & Upper Blackrock Spire are one physical instance in Classic
+            -- (id 229, GetInstanceInfo name "Blackrock Spire") — both map to 229.
+            { id = 229, name = "Lower Blackrock Spire" },
+            { id = 229, name = "Upper Blackrock Spire" },
+            { id = 429, name = "Dire Maul" },
+            { id = 329, name = "Stratholme" },
+            { id = 289, name = "Scholomance" },
+            { id = 409, name = "Molten Core" },
+            { id = 249, name = "Onyxia's Lair" },
         },
         bannedItems = {},
         bannedQuests = {},
@@ -5946,8 +5948,8 @@ ns.Phases = {
         raid        = "Blackwing Lair",
         profCap     = 300,
         instanceUnlocks = {
-            "Blackwing Lair",
-            "Zul'Gurub",
+            { id = 469, name = "Blackwing Lair" },
+            { id = 309, name = "Zul'Gurub" },
         },
         bannedItems = {},
         bannedQuests = {},
@@ -5959,8 +5961,8 @@ ns.Phases = {
         raid        = "Temple of Ahn'Qiraj",
         profCap     = 300,
         instanceUnlocks = {
-            "Ruins of Ahn'Qiraj",
-            "Temple of Ahn'Qiraj",
+            { id = 509, name = "Ruins of Ahn'Qiraj" },
+            { id = 531, name = "Temple of Ahn'Qiraj" },
         },
         bannedItems = {},
         bannedQuests = {},
@@ -5972,8 +5974,11 @@ ns.Phases = {
         raid        = "Naxxramas",
         profCap     = 300,
         instanceUnlocks = {
-            "Karazhan Crypts",
-            "Naxxramas",
+            -- SoD-custom instance: id unverified (couldn't confirm outside the client).
+            -- Name fallback covers enUS; fill `id` to make it locale-safe. TODO: verify
+            -- in-client with /dump select(8, GetInstanceInfo()) while standing inside.
+            { name = "Karazhan Crypts" },
+            { id = 533, name = "Naxxramas" },
         },
         bannedItems = {},
         bannedQuests = {},
@@ -5985,7 +5990,10 @@ ns.Phases = {
         raid        = "Scarlet Enclave",
         profCap     = 300,
         instanceUnlocks = {
-            "Scarlet Enclave",
+            -- SoD-custom instance: id unverified (couldn't confirm outside the client).
+            -- Name fallback covers enUS; fill `id` to make it locale-safe. TODO: verify
+            -- in-client with /dump select(8, GetInstanceInfo()) while standing inside.
+            { name = "Scarlet Enclave" },
         },
         bannedItems = {},
         bannedQuests = {},
@@ -6007,25 +6015,39 @@ local function normalizeInstanceName(name)
     return (name:gsub("[^%w]", ""))
 end
 
--- Build the cumulative set of enterable instances for each phase (normalized
--- for locale/article-insensitive matching against GetInstanceInfo()).
+-- Build the cumulative set of enterable instances for each phase. Keyed primarily by
+-- instance ID (GetInstanceInfo()'s 8th return), which never localizes; a normalized-name
+-- set is built alongside as a locale-fragile safety net for entries whose ID is unknown
+-- (SoD-custom instances we couldn't verify — see the TODOs in the data above). Each
+-- `instanceUnlocks` entry is `{ id = <number|nil>, name = <string> }`.
 local function BuildCumulativeInstances()
-    local running = {}
+    local ids, names = {}, {}
     for i = ns.MIN_PHASE, ns.MAX_PHASE do
         local phase = ns.Phases[i]
-        for _, name in ipairs(phase.instanceUnlocks) do
-            running[normalizeInstanceName(name)] = true
+        for _, entry in ipairs(phase.instanceUnlocks) do
+            if entry.id then ids[entry.id] = true end
+            if entry.name then names[normalizeInstanceName(entry.name)] = true end
         end
-        local snapshot = {}
-        for k in pairs(running) do snapshot[k] = true end
-        phase.allowedInstances = snapshot
+        local idSnap, nameSnap = {}, {}
+        for k in pairs(ids) do idSnap[k] = true end
+        for k in pairs(names) do nameSnap[k] = true end
+        phase.allowedInstances = idSnap          -- set of allowed instance IDs
+        phase.allowedInstanceNames = nameSnap    -- normalized-name safety net
     end
 end
 BuildCumulativeInstances()
 
--- Returns true if the named instance is enterable at the given phase.
-function ns.IsInstanceAllowed(phaseIndex, instanceName)
+-- Returns true if the instance is enterable at the given phase. Prefer the locale-safe
+-- ID match; fall back to the normalized name only when the ID isn't in the allowed set
+-- (so an instance whose data ID is missing/unverified still resolves on an enUS client).
+function ns.IsInstanceAllowed(phaseIndex, instanceID, instanceName)
     local phase = ns.Phases[phaseIndex]
-    if not phase or not instanceName then return true end
-    return phase.allowedInstances[normalizeInstanceName(instanceName)] == true
+    if not phase then return true end
+    if instanceID and phase.allowedInstances[instanceID] then return true end
+    if instanceName and phase.allowedInstanceNames[normalizeInstanceName(instanceName)] then
+        return true
+    end
+    -- Nothing to match on at all (both nil) → don't lock (fail open, as before).
+    if not instanceID and not instanceName then return true end
+    return false
 end

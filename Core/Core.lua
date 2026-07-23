@@ -538,6 +538,17 @@ function Addon:HandleSlash(input)
         self:Print(string.format("Mode |cff00ff00%s|r | %s | level cap %d | set by %s (epoch %d)",
             self:GetMode(), data and data.name or "?", data and data.levelCap or 0, r.setBy ~= "" and r.setBy or "—", r.epoch))
         self:Print(self:IsOfficer() and "You are an officer (can set the phase)." or "You are a member (read-only).")
+        -- When inside an instance, surface its locale-independent ID + name so the
+        -- instanceUnlocks IDs can be verified (esp. SoD-custom instances whose ID we
+        -- couldn't confirm outside the client) and any lockout diagnosed.
+        if IsInInstance() then
+            local iname, itype = GetInstanceInfo()
+            local iid = select(8, GetInstanceInfo())
+            local allowed = ns.IsInstanceAllowed(self:GetActivePhase(), iid, iname)
+            self:Print(string.format("Instance: |cffffd100%s|r (id %s, type %s) — %s at this phase.",
+                iname or "?", tostring(iid), itype or "?",
+                allowed and "|cff00ff00allowed|r" or "|cffff3030locked|r"))
+        end
         if not self:RulesetKnown() then
             -- Nothing is being enforced right now; say so plainly and say why, so a
             -- player seeing no restrictions doesn't read it as the addon being broken.

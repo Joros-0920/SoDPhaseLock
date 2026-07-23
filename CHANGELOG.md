@@ -4,6 +4,14 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.15] - 2026-07-23
+
+### Fixed
+- **Guild Found: gold added to your own side of a trade with an outsider no longer leaves the Trade button live.** Adding gold via the money box or by dragging it onto the trade window fires no event the addon listens to (WoW's `TRADE_MONEY_CHANGED` reflects only the *other* player's money), and Blizzard's own code re-enables the Trade button as soon as the amount is affordable — so a trade carrying gold could look tradeable, most visibly when an allowlisted item was already in the window. The addon now re-checks the trade whenever your offered gold changes, so the button reflects the block. (The final accept was already blocked as a backstop; this closes the misleading-button gap.)
+- **Guild Found wealth integrity: any mail income from outside the guild is now flagged.** Mail is used as a "credit source" — value seen in your inbox offsets a later wealth gain, on the assumption it merely moved into your bags rather than being newly acquired. In a closed economy that only holds for mail from a fellow guild member; gold/items from an outsider, the Auction House, or system/NPC mail are income entering from outside the guild. Collecting such mail during an addon-off window (or after merely viewing it while the addon was on, which seeded the credit) folded to nothing and was never flagged. Only guildmate mail now credits — everything else is attributed to the unmonitored window. (A guildmate is never mis-flagged: mail credits normally while the guild roster is still loading and whenever the sender can't be read.)
+
+---
+
 ## [0.7.12] - 2026-07-19
 
 ### Fixed

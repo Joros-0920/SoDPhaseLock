@@ -14,7 +14,8 @@ local Addon = ns.Addon
 --     w.money    exact copper (GetMoney)
 --     w.vCarried vendor sell-value of bags + equipped gear
 --     w.vBank    vendor sell-value of the bank (refreshed only while the bank frame is open)
---     w.vMail    vendor sell-value of inbox items + inbox gold (a CREDIT SOURCE only)
+--     w.vMail    vendor sell-value of inbox items + inbox gold (a CREDIT SOURCE only;
+--                GUILDMATE mail only — outsider/AH/system mail is excluded, see below)
 -- Total tracked wealth T = money + vCarried + vBank + vMail. Any relocation BETWEEN these
 -- buckets leaves T unchanged, so — unlike the old per-item/per-axis ledger — moving gear
 -- equip<->bag or item bag<->bag can never read as a gain. This deletes an entire class of
@@ -101,7 +102,32 @@ local function valueOf(counts)
     return total, resolved
 end
 
--- Inbox item contents (itemID -> count), readable only while the mail frame is open.
+-- Mail is a credit source (its value offsets a gap gain, on the theory that value seen in the
+-- inbox merely RELOCATED into bags/money when collected — not newly acquired). In a closed
+-- economy that holds ONLY for mail from a fellow guild member: that is value already inside the
+-- guild. Everything else — outsider players, the Auction House, and system/NPC mail — is income
+-- from OUTSIDE the guild, which Guild Found forbids, so it must never credit away a gap gain.
+-- Otherwise collecting such mail during an addon-off gap (or after merely VIEWING it while
+-- loaded, which used to seed vMail) folds to nothing and is never flagged. So: creditable IFF
+-- the sender is a current guild member; all other mail is excluded (i.e. counts toward the flag).
+--
+-- Fail-safe to "creditable" (return false) so a genuine guildmate is never mis-flagged:
+--   * sender unreadable (API missing / nil) — can't attribute it, so don't invent a flag; and
+--   * we're guilded but the roster hasn't loaded yet (GetNumGuildMembers == 0 at/just after
+--     login), which would momentarily read a guildmate as an outsider.
+local function mailCreditExcluded(index)
+    if not GetInboxHeaderInfo then return false end
+    local _, _, sender = GetInboxHeaderInfo(index)
+    if not sender then return false end                                    -- sender unknown
+    if IsInGuild and IsInGuild()
+       and (not GetNumGuildMembers or (GetNumGuildMembers() or 0) == 0) then
+        return false                                                       -- roster not loaded yet
+    end
+    return Addon:GetGuildRankIndex(sender) == nil                          -- not a guildmate → excluded
+end
+
+-- Inbox item contents (itemID -> count), readable only while the mail frame is open. Only
+-- creditable mail is summed (see mailCreditExcluded) — this feeds the vMail credit source alone.
 local ATTACH_MAX = ATTACHMENTS_MAX_RECEIVE or 16
 local function mailItemCounts()
     local counts = {}
@@ -109,17 +135,19 @@ local function mailItemCounts()
     if not getNum then return counts end
     local n = getNum() or 0
     for m = 1, n do
-        for a = 1, ATTACH_MAX do
-            local id
-            if GetInboxItem then id = select(2, GetInboxItem(m, a)) end
-            if not id and GetInboxItemLink then
-                local link = GetInboxItemLink(m, a)
-                if link then id = tonumber(link:match("item:(%d+)")) end
-            end
-            if id then
-                local count = 1
-                if GetInboxItem then count = select(4, GetInboxItem(m, a)) or 1 end
-                counts[id] = (counts[id] or 0) + count
+        if not mailCreditExcluded(m) then
+            for a = 1, ATTACH_MAX do
+                local id
+                if GetInboxItem then id = select(2, GetInboxItem(m, a)) end
+                if not id and GetInboxItemLink then
+                    local link = GetInboxItemLink(m, a)
+                    if link then id = tonumber(link:match("item:(%d+)")) end
+                end
+                if id then
+                    local count = 1
+                    if GetInboxItem then count = select(4, GetInboxItem(m, a)) or 1 end
+                    counts[id] = (counts[id] or 0) + count
+                end
             end
         end
     end
@@ -135,8 +163,10 @@ local function mailGold()
     local n = getNum() or 0
     local total = 0
     for m = 1, n do
-        local money = select(5, getHdr(m))   -- GetInboxHeaderInfo: ..., money(5), CODAmount(6), ...
-        if money then total = total + money end
+        if not mailCreditExcluded(m) then
+            local money = select(5, getHdr(m))   -- GetInboxHeaderInfo: ..., money(5), CODAmount(6), ...
+            if money then total = total + money end
+        end
     end
     return total
 end
