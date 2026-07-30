@@ -128,7 +128,15 @@ end
 -- Level cap (both modes)
 -- ---------------------------------------------------------------------------
 function Enforcement:CheckLevel()
-    if not (Addon.db.profile.enabled and enabled("level")) then return end
+    if not (Addon.db.profile.enabled and enabled("level")) then
+        -- Zero the violation rather than latching it. Every sibling check (CheckGear,
+        -- CheckBags, CheckProfessions, CheckQuestLog, CheckRune) clears its own count on
+        -- the disabled path; this one used to return early, so a member flagged over-cap
+        -- kept broadcasting vL=1 — "over level cap" on the roster — for the rest of the
+        -- session after the level rule was turned off.
+        self.violations.overLevel = false
+        return
+    end
     local cap = P() and P().levelCap or 60
     local lvl = UnitLevel("player")
     self.violations.overLevel = lvl > cap

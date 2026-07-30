@@ -49,12 +49,16 @@ StaticPopupDialogs["SODPHASELOCK_GFCLEAR_CONFIRM"] = {
 -- ---------------------------------------------------------------------------
 -- Guild Found wealth "Audit" window (0.7.9+): shows the estimated net VALUE a member's
 -- status ping reported as having moved while their addon was off (Modules/Integrity.lua),
--- framed around the authoritative /played gap and explicitly best-effort. A pre-0.7.9
--- member instead carries the legacy per-item list (`wealthLog`/`wealthMoney`), still shown
--- for a mixed-version guild. Opened from the officer/self "Audit" button on a flagged row.
+-- framed around the authoritative /played gap and explicitly best-effort, plus (0.7.16+) a
+-- display-only list of WHICH items arrived — the value estimate alone couldn't tell an
+-- officer whether "~40g" was one raid drop or forty herbs. That list decides nothing; the
+-- row is flagged on the value scalar alone. A pre-0.7.9 member instead carries the legacy
+-- per-item list (`wealthLog`/`wealthMoney`), still shown for a mixed-version guild.
+-- Opened from the officer/self "Audit" button on a flagged row.
 -- ---------------------------------------------------------------------------
 local auditFrame
 local auditPlayer
+local ShowAudit   -- forward declaration: the item list schedules a re-render through it
 
 -- Full-width note line (local copy so the audit window, defined above the shared
 -- addNote helper, doesn't depend on its declaration order).
@@ -76,7 +80,46 @@ local function fmtAuditMoney(copper)
     return sign .. " " .. body
 end
 
-local function ShowAudit(playerName, isRetry)
+-- Display-only "what arrived" list (0.7.16+). Entries are { itemID, count } — net per-item
+-- gains across the member's unmonitored window (Modules/Integrity.lua recordItemDelta).
+-- Evidence for an officer to read, NOT part of the verdict: an entry here means "this
+-- appeared while nobody was watching", never "this was acquired illegitimately". Ordinary
+-- looting, questing and vendor buys land here too, which is exactly why it must stay out of
+-- the flag decision.
+local function addAuditItemList(scroll, log, playerName, isRetry)
+    addNoteInline(scroll, "\n|cffffd100Items that appeared while unmonitored:|r")
+    if type(log) ~= "table" or #log == 0 then
+        addNoteInline(scroll, "|cff808080None listed — a gold-only change lists nothing, and members"
+            .. " on an older version don't report this.|r")
+        return
+    end
+    local anyUncached = false
+    for _, entry in ipairs(log) do
+        local id, n = entry[1], entry[2] or 1
+        local _, link, _, _, _, _, _, _, _, tex = GetItemInfo(id)
+        if not link then anyUncached = true end
+        local row = AceGUI:Create("InteractiveLabel")
+        row:SetFullWidth(true)
+        row:SetText((link or string.format("|cffffffffItem #%s (loading…)|r", tostring(id)))
+            .. ((n > 1) and (" |cffffd100x" .. n .. "|r") or ""))
+        if tex then row:SetImage(tex) end
+        row:SetCallback("OnEnter", function(widget)
+            GameTooltip:SetOwner(widget.frame, "ANCHOR_RIGHT")
+            GameTooltip:SetHyperlink("item:" .. tostring(id))
+            GameTooltip:Show()
+        end)
+        row:SetCallback("OnLeave", function() GameTooltip:Hide() end)
+        scroll:AddChild(row)
+    end
+    -- Item names/textures resolve asynchronously; rebuild once if any weren't cached.
+    if anyUncached and not isRetry and C_Timer and C_Timer.After then
+        C_Timer.After(0.6, function()
+            if auditFrame and auditPlayer == playerName then ShowAudit(playerName, true) end
+        end)
+    end
+end
+
+ShowAudit = function(playerName, isRetry)
     auditPlayer = playerName
     if auditFrame then auditFrame:Release() end
     auditFrame = AceGUI:Create("Frame")
@@ -129,6 +172,7 @@ local function ShowAudit(playerName, isRetry)
             .. " gains equal in value to bank/mail contents are conservatively not counted. This is a signal that"
             .. " the member acquired value while unmonitored — corroboration for the /played gap above, not proof of"
             .. " a specific trade.|r")
+        addAuditItemList(scroll, info.wealthItemLog, playerName, isRetry)
         return
     end
 
@@ -298,10 +342,29 @@ end
 -- huge guild can't render a wall of rows. Extra members collapse to a count.
 local NOT_DETECTED_CAP = 25
 
+-- Status cell text for a guild row, plus any officer-only footnote.
+--
+-- "wealth check not yet armed": the member's addon has not sampled their bank and mailbox
+-- yet, so Guild Found wealth integrity structurally reports 0 for them (an unsampled
+-- reservoir is unknown, not empty — see Modules/Integrity.lua) and the row reads clean
+-- whether or not it is. That blind spot is worth an officer knowing about, but it is NOT a
+-- violation — the member has done nothing wrong and can't hurry it — so it decorates the
+-- cell only and never enters `reasons`, which is what decides `compliant`. A nil
+-- `wealthArmed` is a pre-0.7.16 client: unknown, so say nothing.
+local function statusCell(info, officer)
+    local text = info.reasons or "OK"
+    if officer and info.wealthArmed == 0 and Addon:WealthIntegrityOn() then
+        text = text .. " |cff808080(wealth check not yet armed)|r"
+    end
+    return text
+end
+
 local function BuildGuildRows(scroll)
     local list = ns.Compliance and ns.Compliance:GetSorted() or {}
+    -- Resolved once per rebuild: IsOfficer walks the whole guild roster.
+    local officer = Addon:IsOfficer()
     -- Integrity view ("Addon Not Detected") is officer-only.
-    local unreported = (Addon:IsOfficer() and ns.Compliance and ns.Compliance:GetIntegrityRows()) or {}
+    local unreported = (officer and ns.Compliance and ns.Compliance:GetIntegrityRows()) or {}
 
     if #list == 0 and #unreported == 0 then
         addNote(scroll, "\nNo reports yet. Guild members running this addon will appear here within a minute.")
@@ -338,7 +401,7 @@ local function BuildGuildRows(scroll)
                 i.mode or "?",
                 i.xpLocked and "|cff40ff40Locked|r" or "|cff808080—|r",
                 versionCell(i.version),
-                i.reasons or "OK",
+                statusCell(i, officer),
             }, color, e.name, ns.Compliance and
                 (ns.Compliance:IsFlagged(e.name) or ns.Compliance:HasPlayedGap(e.name)
                  or ns.Compliance:HasWealthGap(e.name)),

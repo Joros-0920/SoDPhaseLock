@@ -292,6 +292,28 @@ function Comm:SendStatus()
         -- 0.7.9 member falls back to the `up` played gap; a 0.7.9 officer still reads a legacy
         -- member's wm/wq (see Compliance:Record).
         wv    = (ns.Integrity and ns.Integrity:GetUnaccountedValue()) or 0,  -- estimated net copper value gained
+        -- Is the wealth check ARMED for us yet? The bank is only readable while its frame is
+        -- open, and an unsampled bank is unknown rather than empty, so Integrity declines to
+        -- fold anything until it has been seen once (see Integrity:WealthArmed). Until then
+        -- `wv` is structurally 0 — indistinguishable on the wire from an honest member with
+        -- nothing to report. Publishing readiness turns that silent blind spot into a visible
+        -- one, which is the whole model here: we can't prevent, so we surface. Additive and
+        -- optional — a pre-0.7.16 client omits it, so a nil `wr` means "unknown / legacy",
+        -- never "not armed".
+        wr    = (ns.Integrity and ns.Integrity.WealthArmed
+                 and ns.Integrity:WealthArmed()) and 1 or 0,
+        -- DISPLAY-ONLY bounded { {itemID, count}, ... } of what arrived across an addon-off
+        -- gap, so the officer Audit view can show WHAT moved and not just an approximate
+        -- total (Modules/Integrity.lua recordItemDelta). Decides nothing on either end.
+        -- New field name, NOT the old `wl`: that one was a flat itemID list, and reshaping a
+        -- retired field would break invariant 8's "never repurpose" even where the legacy
+        -- reader happens to be unreachable today.
+        -- Sent only while our value is actually reportable — the Audit button that reads it
+        -- appears only then (Compliance:HasWealthGap), so otherwise it is pure traffic, and
+        -- an item list is the most personal thing on this wire. nil ⇒ omitted entirely.
+        wil   = (ns.Integrity and ns.Integrity.GetItemLog
+                 and Addon:WealthValueReportable(ns.Integrity:GetUnaccountedValue())
+                 and ns.Integrity:GetItemLog()) or nil,
         v     = VERSION,                         -- addon version, for out-of-date detection
     })
 end

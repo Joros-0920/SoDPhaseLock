@@ -21,6 +21,12 @@ ns.Playtime = Playtime
 -- advancement lost to a hard crash (no PLAYER_LOGOUT). Each such slip is < TOLERANCE,
 -- so none is miscounted.
 local TOLERANCE = 180
+-- Published so the ONE place that defines the detector's resolution also defines the
+-- smallest guild-leader tolerance that can mean anything. `unobserved` never accrues a
+-- gap at or below TOLERANCE, so a synced threshold below it is a dead value: it reads as
+-- stricter but behaves identically to TOLERANCE. Core:PlayedGapThreshold clamps to this
+-- and the options slider takes its minimum from it (see UI/Options.lua).
+ns.PLAYED_GAP_TOLERANCE = TOLERANCE
 local ADVANCE_INTERVAL = 60
 -- The Guild Found wealth-integrity check (Modules/Integrity.lua) reuses this same login-gap
 -- signal but with a MUCH smaller tolerance. Rationale: a closed economy has no acceptable
@@ -31,7 +37,24 @@ local ADVANCE_INTERVAL = 60
 -- inflate the wealth diff, and (2) the fold only ever reports a NONZERO change — a spurious
 -- short gap with no actual wealth movement folds to nothing. So the 180s crash-slop guard the
 -- played flag needs simply doesn't apply here. Kept above ~0 to absorb login/logout processing.
-local WEALTH_TOLERANCE = 5
+-- ZERO by default: in a closed economy there is no acceptable amount of unmonitored play, so ANY
+-- measurable gap is evaluated for wealth movement. Safe to sit at 0 for two reasons that do not
+-- apply to the played counter:
+--   (1) `gap` is already discounted by `monitored` (see `loadedAt`), and that discount deliberately
+--       OVER-subtracts — we load a moment before world entry — so a clean login measures 0, not a
+--       few seconds of noise.
+--   (2) The fold only ever reports a NONZERO change. A spurious short gap with no actual movement
+--       folds to nothing, and ns.WEALTH_VALUE_FLOOR discards the rest as noise. So a tolerance of 0
+--       costs an extra evaluation, never a false flag.
+-- The residual it does buy us: a `/reload` leaves a real 2-5s in-world window with the addon
+-- unloaded, which 5s used to absorb silently. Now it is evaluated — and folds to nothing unless
+-- value genuinely moved in it.
+local WEALTH_TOLERANCE = 0
+-- Published as the DEFAULT. Core:WealthGapTolerance is the authority: when the guild leader has
+-- the played-without-addon check on, THEIR tolerance governs the wealth fold too, so a member
+-- inside the configured slack can't come back flagged on the wealth axis for the same window.
+-- This value applies when no such policy has been set — and it is 0, so everything is flagged.
+ns.WEALTH_GAP_TOLERANCE = WEALTH_TOLERANCE
 -- How long after login we let the guild answer our high-water query (Comm sends the
 -- "PWQ" a few seconds in) before attributing any cross-session gap. Must comfortably
 -- exceed Comm's PWQ send + reply jitter so an honest alternate PC adopts its shared
@@ -52,9 +75,10 @@ local anchorLocal    -- GetTime() at that instant
 -- RECONCILE_WINDOW+jitter (8-11s) AFTER we loaded, and the character is IN-WORLD for all of
 -- it, so raw (serverNow - observed) over-reports the addon-off gap by that much on EVERY
 -- login. That time was monitored — we were loaded for it — so it must be subtracted before
--- the gap is compared to either tolerance. Without this the 5s WEALTH_TOLERANCE sits below
--- the measurement floor and every clean login folds a wealth diff. Session-only, never
--- persisted (GetTime resets on client restart).
+-- the gap is compared to either tolerance. This is what lets the wealth tolerance sit at 0:
+-- without the discount the raw measurement floor is ~8-11s and EVERY clean login would fold a
+-- wealth diff. It deliberately over-subtracts (we load a moment before world entry), so a clean
+-- login measures 0. Session-only, never persisted (GetTime resets on client restart).
 local loadedAt
 
 local function pt()
@@ -129,10 +153,12 @@ local function attributeLogin(serverNow, readAt)
     -- Hand the same login-gap signal to the Guild Found wealth-integrity tracker so it
     -- can diff gold/bags across the unmonitored window (see Modules/Integrity.lua).
     -- Playtime stays the sole gap detector; Integrity is a passive consumer. The wealth
-    -- path evaluates on the tighter WEALTH_TOLERANCE (independent of the 180s played flag),
-    -- so a shorter addon-off window still catches off-radar gold/items.
+    -- threshold is the guild leader's own tolerance when they have set one, and otherwise the
+    -- WEALTH_TOLERANCE default of 0 — ANY measurable gap is evaluated. See Core:WealthGapTolerance
+    -- for why the two must not disagree. Independent of the 180s `added` flag either way.
+    local wealthThr = (Addon.WealthGapTolerance and Addon:WealthGapTolerance()) or WEALTH_TOLERANCE
     if ns.Integrity and ns.Integrity.OnLoginAttributed then
-        ns.Integrity:OnLoginAttributed(gap, added, gap > WEALTH_TOLERANCE)
+        ns.Integrity:OnLoginAttributed(gap, added, gap > wealthThr)
     end
 end
 

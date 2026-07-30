@@ -236,23 +236,86 @@ end
 -- a normal open. Residual gap (best-effort, unpreventable): an addon that upvalue-cached
 -- the raw function at load and calls that local directly bypasses us — accepted under
 -- the honor-system integrity model (see PROGRESS.md).
-local TAKE_FNS  = { "TakeInboxItem", "TakeInboxMoney", "AutoLootMailItem" }
-local mailWraps = {}   -- set of wrapper fns WE installed, so re-running is a no-op on them
+-- Set of wrapper fns WE installed, so re-running an installer is a no-op on our own work and
+-- only re-wraps when something else has displaced us — no chain growth on a normal open.
+local ourWraps = {}
+
+-- Wrap `tbl[name]` so that `guard(...)` returning true ABORTS the call. Idempotent via ourWraps;
+-- calling it again after another addon has replaced the function puts us back on the outside,
+-- with that addon's version preserved as our captured `orig` so its behaviour still runs for
+-- permitted actions. Missing functions are skipped, so this is safe across client builds.
+local function installGuard(tbl, name, guard)
+    local cur = tbl[name]
+    if not cur or ourWraps[cur] then return end
+    local orig = cur
+    local wrapped = function(...)
+        if guard(...) then return end
+        return orig(...)
+    end
+    ourWraps[wrapped] = true
+    tbl[name] = wrapped
+end
+
+local TAKE_FNS = { "TakeInboxItem", "TakeInboxMoney", "AutoLootMailItem" }
 local function installMailTakeGuards()
     for _, name in ipairs(TAKE_FNS) do
-        local cur = _G[name]
-        if cur and not mailWraps[cur] then
-            local orig = cur
-            local wrapped = function(index, ...)
-                if active("mail") and mailFromOutsider(index) then
-                    Addon:Alert("You can't take anything from mail sent by someone outside your guild.", "guildfound-inbox-open")
-                    return
-                end
-                return orig(index, ...)
+        installGuard(_G, name, function(index)
+            if active("mail") and mailFromOutsider(index) then
+                Addon:Alert("You can't take anything from mail sent by someone outside your guild.", "guildfound-inbox-open")
+                return true
             end
-            mailWraps[wrapped] = true
-            _G[name] = wrapped
+            return false
+        end)
+    end
+end
+
+-- Trade completion. AcceptTrade is a plain global, and this is THE enforcement point — we never
+-- force the window shut, so a player can still open a trade and exchange allowlisted items (and a
+-- solo player with no guild is governed entirely by their own allowlist). Re-asserted rather than
+-- installed once: a trade-log or auto-trade addon that loads after us and replaces the global
+-- would otherwise silently remove the hard backstop, leaving only the disabled Trade button,
+-- which is cosmetic. Same reasoning, and the same idempotency, as the mail take-guards above.
+local function installTradeGuard()
+    installGuard(_G, "AcceptTrade", function()
+        if not active("trade") then return false end
+        local partner = UnitName("NPC")
+        if partner and partner ~= "" and not isGuildmate(partner) and tradeHasBlockedContent() then
+            Addon:Alert("This trade can't be completed outside your guild — only listed items, and never gold.", "guildfound-trade")
+            return true
         end
+        return false
+    end)
+end
+
+-- Outbound mail: abort sends to non-guildmates before dispatch. Re-asserted for the same reason
+-- as the take-guards — bulk-mail addons replace this global too.
+local function installMailSendGuard()
+    installGuard(_G, "SendMail", function(recipient)
+        if active("mail") and not isGuildmate(recipient) then
+            Addon:Alert("You can only mail guild members while Guild Found is active.", "guildfound-mail")
+            return true
+        end
+        return false
+    end)
+end
+
+-- Auction House (defense in depth): the retail C_AuctionHouse API is present in SoD. Guard both
+-- the post AND the buy entry points, so nothing crosses the AH even if the window somehow stays
+-- open — for a closed economy gold leaving via a buyout/bid matters as much as posting.
+local AH_FNS = {
+    "PostItem", "PostCommodity",                                          -- sell side
+    "PlaceBid", "StartCommoditiesPurchase", "ConfirmCommoditiesPurchase", -- buy side
+}
+local function installAuctionGuards()
+    if not C_AuctionHouse then return end
+    for _, fn in ipairs(AH_FNS) do
+        installGuard(C_AuctionHouse, fn, function()
+            if active("auction") then
+                Addon:Alert("The Auction House is disabled while Guild Found is active.", "guildfound-ah")
+                return true
+            end
+            return false
+        end)
     end
 end
 
@@ -261,7 +324,9 @@ function GuildFound:OnEnable()
     -- Trade: partner name is available as unit "NPC" once the window is shown.
     -- Re-evaluate on every content change (items/gold added) and on accept, since
     -- the allowlist decision depends on what is in the window, not just who it's with.
-    self:RegisterEvent("TRADE_SHOW",                 "EvaluateTrade")
+    -- TRADE_SHOW also re-asserts the AcceptTrade backstop (see OnTradeShow), so we are the
+    -- outermost check at the moment the window is actually used.
+    self:RegisterEvent("TRADE_SHOW",                 "OnTradeShow")
     self:RegisterEvent("TRADE_ACCEPT_UPDATE",        "EvaluateTrade")
     self:RegisterEvent("TRADE_MONEY_CHANGED",        "EvaluateTrade")
     self:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED",  "EvaluateTrade")
@@ -303,42 +368,6 @@ function GuildFound:OnEnable()
     -- Inbound mail from outsiders is blocked at open/take time (see the OpenMail and
     -- TakeInbox* hooks below); we do NOT pre-emptively warn just because such mail is
     -- sitting in the inbox.
-
-    -- Trade completion: AcceptTrade is a plain global. Wrap it once so a trade with a
-    -- player outside your guild can't be finalised if it contains gold or any item not
-    -- on the allowlist. This is the enforcement point — we never force the window
-    -- shut, so the player can still open a trade and exchange allowlisted items (and a
-    -- solo player with no guild is governed entirely by their own allowlist). Guard
-    -- against double-wrap.
-    if not self.tradeHooked and AcceptTrade then
-        self.tradeHooked = true
-        local origAccept = AcceptTrade
-        AcceptTrade = function(...)
-            if active("trade") then
-                local partner = UnitName("NPC")
-                if partner and partner ~= "" and not isGuildmate(partner) and tradeHasBlockedContent() then
-                    Addon:Alert("This trade can't be completed outside your guild — only listed items, and never gold.", "guildfound-trade")
-                    return
-                end
-            end
-            return origAccept(...)
-        end
-    end
-
-    -- Outbound mail: SendMail is a plain global (not combat-protected), so wrap it
-    -- once to abort sends to non-guildmates before dispatch. Same wrap-the-global
-    -- pattern as Enforcement's BuyTrainerService block; guard against double-wrap.
-    if not self.mailHooked and SendMail then
-        self.mailHooked = true
-        local origSendMail = SendMail
-        SendMail = function(recipient, ...)
-            if active("mail") and not isGuildmate(recipient) then
-                Addon:Alert("You can only mail guild members while Guild Found is active.", "guildfound-mail")
-                return
-            end
-            return origSendMail(recipient, ...)
-        end
-    end
 
     -- Inbound mail from outside the guild: prevent it being opened. Hook the
     -- OpenMail frame's OnShow — when a mail is opened, InboxFrame.openMailID is the
@@ -419,37 +448,34 @@ function GuildFound:OnEnable()
         end)
     end
 
-    -- Backstop: block the attachment/money take functions too, so nothing can be
-    -- extracted from an outsider's mail even if the frame is bypassed — this is also what
-    -- stops "open all mail" addons, which drive these same globals. Installed now and
-    -- re-asserted on MAIL_SHOW so we stay outermost even if a mail addon replaces a global
-    -- after us (see installMailTakeGuards).
+    -- Install every global guard now, and re-assert each on the event that immediately precedes
+    -- its use. An addon loading after us and replacing one of these globals would otherwise
+    -- silently remove the enforcement — for trade that means only the disabled button is left,
+    -- which is cosmetic. The ourWraps marker set makes re-running a no-op unless we have actually
+    -- been displaced, so a normal open costs nothing and the wrapper chain never grows.
+    --
+    -- Residual gap (best-effort, unpreventable): an addon that upvalue-cached the raw function at
+    -- load and calls that local directly bypasses us — accepted under the honor-system integrity
+    -- model (see PROGRESS.md).
+    installTradeGuard()
     installMailTakeGuards()
-    self:RegisterEvent("MAIL_SHOW", installMailTakeGuards)
+    installMailSendGuard()
+    installAuctionGuards()
+    self:RegisterEvent("MAIL_SHOW", "OnMailShow")
+end
 
-    -- Auction House (defense in depth): the retail C_AuctionHouse API is present in
-    -- SoD. Wrap both the post AND the buy entry points so nothing crosses the AH even
-    -- if the window somehow stays open — for a closed economy gold leaving via a
-    -- buyout/bid matters as much as posting. Missing functions are skipped (`if orig`),
-    -- so this is safe across builds. Guard against double-wrap; all are plain globals.
-    if not self.ahHooked and C_AuctionHouse then
-        self.ahHooked = true
-        for _, fn in ipairs({
-            "PostItem", "PostCommodity",                                  -- sell side
-            "PlaceBid", "StartCommoditiesPurchase", "ConfirmCommoditiesPurchase",  -- buy side
-        }) do
-            local orig = C_AuctionHouse[fn]
-            if orig then
-                C_AuctionHouse[fn] = function(...)
-                    if active("auction") then
-                        Addon:Alert("The Auction House is disabled while Guild Found is active.", "guildfound-ah")
-                        return
-                    end
-                    return orig(...)
-                end
-            end
-        end
-    end
+-- Re-assert the mail guards at the moment the inbox is actually used (both the take-side
+-- backstop, which is what stops "open all mail" addons, and the outbound send guard).
+function GuildFound:OnMailShow()
+    installMailTakeGuards()
+    installMailSendGuard()
+end
+
+-- Trade window opened: re-assert the accept backstop before anything can be accepted, then
+-- judge the (empty) window so the button starts in the right state.
+function GuildFound:OnTradeShow()
+    installTradeGuard()
+    self:EvaluateTrade()
 end
 
 -- Should the current trade be blocked from completing? True only when the trade
@@ -507,6 +533,9 @@ end
 -- manager stays in sync (a bare :Hide() would not). Handle both the Classic AuctionFrame
 -- and the retail-style AuctionHouseFrame, whichever a given build presents.
 function GuildFound:OnAuctionHouseShow()
+    -- Re-assert the post/bid guards before anything can be posted or bought, in case an auction
+    -- addon replaced a C_AuctionHouse function after us.
+    installAuctionGuards()
     if not active("auction") then return end
     local function shut()
         if not active("auction") then return end

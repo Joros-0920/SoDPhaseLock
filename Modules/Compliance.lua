@@ -340,6 +340,17 @@ function Compliance:Record(sender, data)
         version    = data.v,         -- reporter's addon version, for the roster's version column
         unobserved = data.up or 0,   -- reported /played-with-addon-off seconds (drives the Clear/forgive button)
         wealthValue = data.wv,       -- 0.7.9+ estimated net copper value moved across an addon-off gap (nil ⇒ legacy member)
+        -- 0.7.16+: is the member's wealth check armed yet (their addon has sampled bank AND
+        -- mailbox once)? Until it is, their `wv` is structurally 0 and indistinguishable from
+        -- an honest zero. Stored raw and rendered officer-only by UI/Roster.lua — it is NOT a
+        -- violation (nothing the member did, nothing they can hurry), so it must stay out of
+        -- `reasons`, which is what decides `compliant`. nil ⇒ pre-0.7.16 client: unknown.
+        wealthArmed = data.wr,
+        -- 0.7.16+: DISPLAY-ONLY { {itemID, count}, ... } of what arrived across the member's
+        -- addon-off gap, rendered by the officer Audit window. Stored, never evaluated —
+        -- `compliant`, `reasons` and HasWealthGap must stay driven by the value scalar alone
+        -- (see Modules/Integrity.lua recordItemDelta for why that separation matters).
+        wealthItemLog = data.wil,
         wealthMoney = data.wm or 0,  -- legacy (pre-0.7.9): signed copper; still shown for a mixed-version member
         wealthItems = data.wq or 0,  -- legacy (pre-0.7.9): quantity of items gained
         wealthLog  = data.wl,        -- legacy (pre-0.7.9): bounded gained-itemID list, for the officer display

@@ -15,6 +15,14 @@ for i = ns.MIN_PHASE, ns.MAX_PHASE do phaseValues[i] = ns.Phases[i].name end
 local function notOfficer()      return not Addon:IsOfficer() end
 local function notGuildLeader()  return not Addon:IsGuildLeader() end
 
+-- Smallest played-without-addon tolerance (minutes) that means anything. Modules/Playtime
+-- never records a gap at or below its own crash/login slop tolerance, so a lower setting
+-- reads as stricter but behaves identically — the slider used to offer 0, 1 and 2 as
+-- indistinguishable dead values (and 0 silently disabled the check outright). Derived
+-- from the detector rather than hardcoded; Core:PlayedGapThreshold clamps saved values
+-- to the same floor, so an existing config below it keeps working.
+local PLAYED_GRACE_MIN = math.ceil((ns.PLAYED_GAP_TOLERANCE or 180) / 60)
+
 -- Commit a guild-config edit (caller already mutated db.global.ruleset).
 -- Pass msg to print a targeted confirmation instead of the generic ruleset line.
 local function commitGuild(msg)
@@ -1577,10 +1585,16 @@ local options = {
                         },
                         playedGapGrace = {
                             type = "range", order = 4, name = "Played-without-addon tolerance (minutes)",
-                            desc = "How much unobserved play time (server /played that grew while the addon was NOT loaded) is tolerated before a member is flagged. Keep some slack for a patch that disables addons or the occasional login without the addon.",
+                            desc = "How much unobserved play time (server /played that grew while the addon was NOT loaded) is tolerated before a member is flagged. Keep some slack for a patch that disables addons or the occasional login without the addon. The minimum is the smallest gap the detector can tell apart from ordinary login/logout processing and a client crash — anything lower would read as stricter but behave the same.",
                             width = "relative", relWidth = 0.5,
-                            min = 0, max = 10, step = 1, disabled = notGuildLeader,
-                            get = function() return Addon:GetRuleset().playedGapGrace or 5 end,
+                            min = PLAYED_GRACE_MIN, max = 10, step = 1, disabled = notGuildLeader,
+                            -- Clamp on read too: a config saved before the floor existed
+                            -- (0/1/2) must display as what it now behaves as, not as a
+                            -- value the slider can no longer represent.
+                            get = function()
+                                local m = Addon:GetRuleset().playedGapGrace or 5
+                                return (m > PLAYED_GRACE_MIN) and m or PLAYED_GRACE_MIN
+                            end,
                             set = function(_, v)
                                 Addon:GetRuleset().playedGapGrace = v
                                 commitGuild("Played-without-addon tolerance: " .. v .. " min")

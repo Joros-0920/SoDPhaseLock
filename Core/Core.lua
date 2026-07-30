@@ -105,6 +105,12 @@ local defaults = {
         -- character has seen the first-run welcome. Lives in `char` (not `profile`)
         -- so assigning a shared profile can't suppress the welcome on a new alt.
         seenWelcome = false,
+        -- Last guild context THIS character resolved to ("" = never in one). Read by
+        -- GuildKey() during the seconds after login when GetGuildInfo("player") is still nil,
+        -- so Guild Found inherits real config instead of the guildless all-off defaults.
+        -- Per-CHARACTER on purpose: it must never hand one character another's guild bucket
+        -- (per-guild isolation).
+        lastGuildKey = "",
         -- Playtime-gap tracking (per realm-character, exactly like server /played).
         -- `observed` = server /played (seconds) as of the last moment the addon was
         -- confirmed loaded and observing (nil until the first TIME_PLAYED_MSG ever).
@@ -117,10 +123,13 @@ local defaults = {
         -- A single conserved wealth-VALUE model (copper), not per-item tracking: `money`,
         -- `vCarried` (bags+equipped sell-value), `vBank` and `vMail` are the last observed
         -- per-bucket values the addon saw while loaded. On a login that Playtime attributes to
-        -- an addon-off gap, the NET rise in (money + vCarried), credited against vBank/vMail, is
-        -- folded into `unaccountedValue` (reported in the status ping as `wv`). Bank and mail are
-        -- credit sources only. Reset by an officer forgive; pre-0.7.9 baselines are wiped once by
-        -- the schema migration in Modules/Integrity.lua (clean slate). See Modules/Integrity.lua.
+        -- an addon-off gap, the NET rise in (money + vCarried) is folded into `unaccountedValue`
+        -- (reported in the status ping as `wv`), minus what can explain it: GUILDMATE mail
+        -- settles immediately, while the item-shaped part becomes a `bankClaim` settled against a
+        -- real bank reading at the next bank visit (gold never claims — Classic has no bank
+        -- gold). Bank and mail never fold gains themselves. Reset by an officer forgive;
+        -- pre-0.7.9 baselines are wiped once by the schema migration in Modules/Integrity.lua
+        -- (clean slate). See Modules/Integrity.lua.
         wealth = {
             schema           = nil,   -- migration marker; set to 2 by the one-time clean-slate reset
             money            = nil,   -- copper baseline (nil until first snapshot)
@@ -215,6 +224,7 @@ function Addon:OnEnable()
     -- ruleset is the bucket for this key, so a guildless alt and a guilded main on
     -- the same account never share one (the cause of cross-character bleed).
     self._guildKey = GetGuildInfo("player") or ""
+    self:NoteGuildKey(self._guildKey)
 
     -- Keep a guild roster handy for officer-rank checks.
     if C_GuildInfo and C_GuildInfo.GuildRoster then
@@ -248,7 +258,30 @@ function Addon:GuildKey()
     if self._guildKey == nil then
         self._guildKey = GetGuildInfo("player") or ""
     end
+    -- A guilded character reads as guildless for the first seconds after login (GetGuildInfo is
+    -- nil until the roster lands), which selects the "" bucket — where Guild Found is all-off by
+    -- default. That is a fail-OPEN: the closed economy went unenforced for exactly as long as the
+    -- context took to resolve, contradicting invariant A6 ("while guild/item/roster data is
+    -- pending, fail safe (over-restrict), never open the economy"). Fall back to the last guild
+    -- THIS character resolved to so the pending window inherits real config.
+    --
+    -- IsInGuild() gates it — it lands well before GetGuildInfo and is what GuildContextReady
+    -- already trusts — so a genuinely guildless character still gets "". Enforcement rules are
+    -- unaffected either way: they gate on RulesetKnown(), which stays false until the context is
+    -- properly ready, so this only ever restores restrictions, never starts judging a phase early.
+    if self._guildKey == "" and IsInGuild() then
+        local last = self.db and self.db.char and self.db.char.lastGuildKey
+        if last and last ~= "" then return last end
+    end
     return self._guildKey
+end
+
+-- Remember a resolved guild context for the fallback above. Only ever records a REAL guild, so
+-- leaving a guild doesn't strand us pointing at its config (IsInGuild() then returns "").
+function Addon:NoteGuildKey(key)
+    if key and key ~= "" and self.db and self.db.char then
+        self.db.char.lastGuildKey = key
+    end
 end
 
 -- Re-resolve the active bucket when the player joins, leaves, or changes guild.
@@ -256,6 +289,16 @@ function Addon:OnGuildChanged()
     local newKey = GetGuildInfo("player") or ""
     if newKey == self._guildKey then return end
     self._guildKey = newKey
+    self:NoteGuildKey(newKey)
+    -- A trade window open across the resolution needs re-judging: while the context was pending
+    -- the roster wasn't loaded either, so isGuildmate() read everyone as an outsider and the
+    -- Trade button was disabled fail-safe. Nothing else would fire an evaluation until the next
+    -- trade event, which may never come — the button would just sit dead on a legitimate
+    -- guildmate trade.
+    local gf = self:GetModule("GuildFound", true)
+    if gf and gf.EvaluateTrade and TradeFrame and TradeFrame:IsShown() then
+        gf:EvaluateTrade()
+    end
     -- Adopt the new context's ruleset locally and ask that guild to sync us up.
     if ns.RefreshOptions then ns.RefreshOptions() end
     if ns.RefreshBagOverlays then ns.RefreshBagOverlays() end
@@ -336,10 +379,40 @@ function Addon:GetNextPhaseDate()  return self:GetRuleset().nextPhaseDate or "" 
 -- same guild-leader-set tolerance.
 function Addon:PlayedGapThreshold()
     local r = self:GetRuleset()
+    -- `playedGapCheck` is the ONLY on/off switch for this rule.
     if not r.playedGapCheck then return 0 end
-    local m = r.playedGapGrace or 5
-    return (m > 0) and (m * 60) or 0
+    -- A grace of 0 used to fall through `(m > 0) and (m * 60) or 0` and return 0, which
+    -- every consumer reads as "check disabled" — so the strictest-looking value on the
+    -- leader's slider silently turned the feature off. Clamp to the detector's own floor
+    -- instead: Playtime never records a gap at or below its TOLERANCE, so any threshold
+    -- under that is a dead value. Treating it as "as strict as the detector can actually
+    -- be" is what the setting reads as, and can only ever flag MORE (never fewer) than
+    -- the old behaviour of silently disabling.
+    local floor = ns.PLAYED_GAP_TOLERANCE or 180
+    local secs  = (r.playedGapGrace or 5) * 60
+    return (secs > floor) and secs or floor
 end
+-- Seconds of unmonitored play tolerated before a WEALTH fold is attributed (Modules/Integrity.lua).
+--
+-- The leader's played-without-addon tolerance governs it whenever that check is on. Previously
+-- the wealth path used a hardcoded 5s regardless, so a member sitting comfortably inside the
+-- slack a leader had deliberately configured still came back flagged on the wealth axis for the
+-- very same window — one event producing two contradicting roster rows, which is how officers
+-- stop trusting both signals.
+--
+-- With the played check OFF the leader has expressed no policy on unmonitored play, so the
+-- default applies — and that default is ZERO: in a closed economy no unmonitored play is
+-- acceptable, so ANY measurable gap is evaluated. Safe for wealth specifically (and why it was
+-- ever decoupled from the played counter's 180s crash-slop guard): the wealth baseline is
+-- maintained continuously while loaded and the fold only reports a NONZERO change, so a spurious
+-- short gap with no actual movement folds to nothing. See Modules/Playtime.lua.
+function Addon:WealthGapTolerance()
+    local thr = self:PlayedGapThreshold()
+    -- Note: 0 is truthy in Lua, so a 0 default survives the `or` — it is a real value here, not
+    -- an absent one, and must not be silently replaced by a nonzero fallback.
+    return (thr > 0) and thr or (ns.WEALTH_GAP_TOLERANCE or 0)
+end
+
 -- Guild Found: each restriction (trade/mail/auction) is an independent toggle.
 function Addon:GuildFound(key)     return self:GetRuleset().guildFound[key] and true or false end
 function Addon:GuildFoundAny()
@@ -631,12 +704,40 @@ function Addon:HandleSlash(input)
             (gf.integrity ~= false) and "|cff00ff00on|r" or "|cffff3030off|r"))
         self:Print(string.format("  wealth integrity evaluated: %s  (needs both of the above)",
             self:WealthIntegrityOn() and "|cff00ff00yes|r" or "|cffff3030no|r"))
+        -- How large an addon-off window is ignored before wealth is even diffed. 0 = any gap at
+        -- all is evaluated (the default); nonzero means a guild leader's played-without-addon
+        -- tolerance is governing this too, so the two signals can't contradict each other.
+        local wthr = self:WealthGapTolerance()
+        self:Print(string.format("  unmonitored-time tolerance: %s",
+            (wthr <= 0) and "|cff00ff00none — any gap is checked|r"
+                or string.format("|cffffd100%d min|r (from the guild's played-without-addon tolerance)",
+                    math.floor(wthr / 60))))
         local integrity = self:GetModule("Integrity", true)
         local w = self.db.char.wealth or {}
         local function coin(v) return (v and GetCoinTextureString(v)) or "—" end
         self:Print(string.format("  session baseline established: %s  (money:%s carried:%s bank:%s mail:%s)",
             (integrity and integrity._ready) and "|cff00ff00yes|r" or "|cffff3030not yet|r",
             coin(w.money), coin(w.vCarried), coin(w.vBank), coin(w.vMail)))
+        -- Neither credit source is readable unless its frame is open, so until each has been
+        -- seen once it is UNKNOWN (not empty) and folding is suppressed entirely — otherwise a
+        -- first bank withdrawal across an addon-off gap would read as value from outside.
+        local armed = integrity and integrity.WealthArmed and integrity:WealthArmed()
+        self:Print(string.format("  wealth check armed: %s  (bank: %s, mailbox: %s)",
+            armed and "|cff00ff00yes|r"
+                or "|cffffd100not yet — flagging is paused until you open each once|r",
+            (w.vBank ~= nil) and "|cff00ff00seen|r" or "|cffff3030never|r",
+            (w.vMail ~= nil) and "|cff00ff00seen|r" or "|cffff3030never|r"))
+        -- Only GUILDMATE mail ever enters the mail figure, and it settles immediately. The bank
+        -- is never credited blind: an item rise becomes a pending claim settled against a real
+        -- reading at the next bank visit. Gold never claims at all (Classic has no bank gold).
+        self:Print(string.format("  last seen — bank: %s, guildmate mail credit: %s",
+            coin(w.vBank), coin(w.vMail)))
+        local claim, remain = (integrity and integrity.GetBankClaim) and integrity:GetBankClaim()
+        if claim then
+            self:Print(string.format(
+                "  pending bank claim: %s |cff808080— not counted against you; open your bank to settle it"
+                .. " (auto-counts after %.1fh more played)|r", GetCoinTextureString(claim), (remain or 0) / 3600))
+        end
         local value = integrity and integrity:GetUnaccountedValue() or 0
         self:Print(string.format("  estimated value gained while off: %s  (best-effort; vendor sell price, unknown items count 0)",
             (value ~= 0) and GetCoinTextureString(value) or "none"))

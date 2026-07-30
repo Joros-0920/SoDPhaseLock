@@ -13,23 +13,27 @@ local Addon = ns.Addon
 -- per-container value baselines while loaded:
 --     w.money    exact copper (GetMoney)
 --     w.vCarried vendor sell-value of bags + equipped gear
---     w.vBank    vendor sell-value of the bank (refreshed only while the bank frame is open)
---     w.vMail    vendor sell-value of inbox items + inbox gold (a CREDIT SOURCE only;
---                GUILDMATE mail only — outsider/AH/system mail is excluded, see below)
+--     w.vBank    vendor sell-value of the bank (refreshed only while the bank frame is open).
+--                Credits an ITEM-backed rise only — Classic has no bank gold (see FOLD)
+--     w.vMail    vendor sell-value of inbox items + inbox gold, GUILDMATE mail only —
+--                outsider/AH/system mail is excluded (mailCreditExcluded, 0.7.15), so mail
+--                from outside the guild can never credit. Credits gold and items alike.
 -- Total tracked wealth T = money + vCarried + vBank + vMail. Any relocation BETWEEN these
 -- buckets leaves T unchanged, so — unlike the old per-item/per-axis ledger — moving gear
 -- equip<->bag or item bag<->bag can never read as a gain. This deletes an entire class of
 -- historical false positives (0.7.5 equip<->bag, the per-item load races) by construction.
 --
 -- FOLD: on a login attributed to an addon-off gap we fold the NET rise in the login-visible
--- buckets (money + vCarried) since the last loaded snapshot, crediting a positive net against
--- the last-known bank/mail value (a rise there could be a withdrawal / mail-take that merely
--- relocated value we already owned, not new value). Bank and mail are CREDIT SOURCES ONLY and
--- never fold gains themselves, so the whole deposit/withdrawal ledger the old model needed is
--- gone; the only residual is a rare miss (over-credit), never a false positive — the codebase's
--- standing trade-off. The authoritative /played gap (Playtime.lua) is the headline signal; this
--- value is a best-effort ESTIMATE (vendor sell price; unknown/uncached items contribute 0)
--- surfaced to officers as corroboration, never proof. See PROGRESS.md → integrity model.
+-- buckets (money + vCarried) since the last loaded snapshot. A positive net is credited against
+-- what could legitimately explain it: the BANK for the item-shaped part of the rise (Classic has
+-- no bank gold, so money has no bank explanation), and GUILDMATE mail for any of it (that is
+-- movement inside the closed economy). Outsider/AH/system mail is excluded from vMail entirely,
+-- so value arriving from outside the guild — gold or items — can never credit itself away. Both
+-- allowances are CONSUMED as used, so a stocked bank is a one-off explanation and not a standing
+-- licence. Bank and mail still never fold gains themselves, so the deposit/withdrawal ledger the
+-- old model needed stays gone. The authoritative /played gap (Playtime.lua) is the headline signal; this value is
+-- a best-effort ESTIMATE (vendor sell price; unknown/uncached items contribute 0) surfaced to
+-- officers as corroboration, never proof. See PROGRESS.md → integrity model.
 --
 -- Best-effort, like everything else: a tier-1 SavedVariables edit can zero the counter, a
 -- tier-2 code edit can forge the report. Both are unpreventable on an untrusted client.
@@ -50,8 +54,14 @@ local function wealth() return Addon.db.char.wealth end
 -- ---------------------------------------------------------------------------
 local function migrate(w)
     if w.schema == 2 then return end
+    -- `itemLog` appears here AND is live again in 0.7.16 — not a contradiction. The schema-1
+    -- itemLog was part of the deciding ledger and had a different shape (flat ID list); the
+    -- 0.7.16 one is display-only { {id, count}, ... }. Wiping the old one on the way in is
+    -- exactly right. `carriedItems` is listed for lockstep with the `vCarried` reset below —
+    -- an item baseline outliving its value baseline would mis-attribute the next fold's log.
     for _, k in ipairs({ "items", "bankItems", "mailItems", "mailMoney", "pendingBankCredit",
-                         "bankGapPending", "equipInBaseline", "itemLog", "unaccountedItems" }) do
+                         "bankGapPending", "equipInBaseline", "itemLog", "unaccountedItems",
+                         "carriedItems", "bankClaim" }) do
         w[k] = nil
     end
     w.money            = nil   -- re-baseline money fresh too (don't trust a possibly-bogus old baseline)
@@ -171,10 +181,17 @@ local function mailGold()
     return total
 end
 
--- Total value currently in the inbox (items + gold), a credit source. Unresolved item names
--- contribute 0 here — a credit source that under-counts only ever DEFERS/MISSES a flag, never
--- creates one, so it needn't block on the cache the way the carried baseline does.
-local function mailValueNow() return (select(1, valueOf(mailItemCounts()))) + mailGold() end
+-- Total value currently in the inbox (items + gold) from GUILDMATES only — the mail credit
+-- source. Returns (value, resolved).
+--
+-- The old comment here claimed an under-count "only ever DEFERS/MISSES a flag, never creates
+-- one". That is backwards for this model: credit SUBTRACTS from the gap delta, so under-counting
+-- a credit source makes a flag MORE likely, not less. (It was true in schema 1, where mail could
+-- fold gains.) So the caller must wait for prices to resolve, exactly as RefreshBank does.
+local function mailValueNow()
+    local val, resolved = valueOf(mailItemCounts())
+    return val + mailGold(), resolved
+end
 
 -- Bag-population probe for login readiness — judged on containers only (equipped gear can read
 -- ready a moment before the container API populates at login).
@@ -193,14 +210,152 @@ local function snapshotMoney(w)
     if m > 0 or w.money == nil then w.money = m end
 end
 
+-- `carriedItems` (the per-item count map) is kept in LOCKSTEP with `vCarried` and written
+-- under exactly the same guard. It exists only to diff for the DISPLAY-ONLY item log (see
+-- recordItemDelta) — the value scalar remains the sole flagging input — but if the two ever
+-- drifted apart the log would attribute items the player legitimately picked up while loaded
+-- to the unmonitored window. Same write, same condition, always.
 local function snapshotCarried(w)
-    local val, resolved = valueOf(carriedCounts())
-    if bagsLoaded() and resolved then w.vCarried = val end
+    local counts = carriedCounts()
+    local val, resolved = valueOf(counts)
+    if bagsLoaded() and resolved then
+        w.vCarried     = val
+        w.carriedItems = counts
+    end
 end
 
 local function snapshotNow(w)
     snapshotMoney(w)
     snapshotCarried(w)
+end
+
+-- ---------------------------------------------------------------------------
+-- DISPLAY-ONLY item log.
+--
+-- Net per-item gains across an unmonitored window, recorded so the officer Audit view can
+-- show WHAT moved instead of only an approximate total. Read this before touching it:
+--
+-- This is NOT the schema-1 per-item ledger coming back. That one DECIDED — item counts fed
+-- the flag — and deciding on per-item data is what produced the false-positive class (equip
+-- <-> bag, bank <-> bag, per-item load races) that the conserved-value model eliminated by
+-- construction. Here the flag is still decided by `unaccountedValue` alone (via
+-- Addon:WealthValueReportable / Compliance:HasWealthGap), so ordinary churn appearing in
+-- this list costs nothing but a log line. **Keep it decorative.** The moment anything reads
+-- it to decide something, the old false-positive class is back.
+--
+-- Bounded (ITEM_LOG_MAX total, most valuable first so truncation keeps the interesting
+-- entries) because it rides on the status ping. Cleared by an officer forgive, like the
+-- counter it accompanies.
+-- ---------------------------------------------------------------------------
+local ITEM_LOG_MAX = 12
+
+local function recordItemDelta(w, nowCounts)
+    local base = w.carriedItems
+    if type(base) ~= "table" or type(nowCounts) ~= "table" then return end
+    local gained = {}
+    for id, n in pairs(nowCounts) do
+        local delta = n - (base[id] or 0)
+        if delta > 0 then
+            -- Precompute the sort key rather than calling GetItemInfo inside the comparator:
+            -- a comparator must be a consistent ordering, and it's O(n log n) lookups.
+            local price = select(11, GetItemInfo(id)) or 0
+            gained[#gained + 1] = { id, delta, price * delta }
+        end
+    end
+    if #gained == 0 then return end
+    table.sort(gained, function(a, b)
+        if a[3] ~= b[3] then return a[3] > b[3] end
+        return a[1] < b[1]
+    end)
+    for _, e in ipairs(gained) do e[3] = nil end   -- wire/storage shape stays { itemID, count }
+    local log = w.itemLog or {}
+    for i = #gained, 1, -1 do table.insert(log, 1, gained[i]) end   -- newest first
+    for i = #log, ITEM_LOG_MAX + 1, -1 do log[i] = nil end
+    w.itemLog = log
+end
+
+-- ---------------------------------------------------------------------------
+-- Deferred bank reconcile.
+--
+-- The bank is the one place a rise in what you CARRY can legitimately come from without new
+-- value entering the guild. But we cannot see it at login — it is readable only while its frame
+-- is open — so the old model credited a stale `vBank` blind. That is what let a guild-bank alt
+-- absorb anything up to the value of its own contents: the allowance was large, unverified, and
+-- (before 0.7.16) never even consumed.
+--
+-- So we no longer credit the bank at fold time. We record a CLAIM — "N copper of item value
+-- appeared, and it may have come out of the bank" — and settle it against a REAL reading the
+-- next time the bank is opened. A withdrawal that actually happened shows up as the bank having
+-- shrunk by about that much; whatever the bank cannot account for is folded in as unaccounted.
+--
+-- Deliberately ONE scalar with ONE resolution point. Schema 1's bidirectional per-item ledger is
+-- what made that model a false-positive factory; this is a single number, settled once, against
+-- a single observation.
+--
+-- Provisional direction is FORGIVE (the claim doesn't flag while pending), matching this
+-- module's standing "a missed gain beats a false accusation" trade-off — an honest banker is
+-- never flagged and then un-flagged. The timeout is what stops that being an escape: a member
+-- who simply never opens a bank again cannot leave a claim pending forever.
+-- ---------------------------------------------------------------------------
+-- Played-SECONDS (not wall clock — GetTime() resets and must never be persisted; see
+-- Modules/Playtime.lua) a claim may stay unsettled before it is folded in unverified. Generous
+-- on purpose: anyone who genuinely withdrew from their bank opened it to do so and will open it
+-- again, so this only bites someone avoiding the bank entirely — and then only delays them.
+local BANK_CLAIM_TIMEOUT = 8 * 3600
+
+local function playedNow()
+    return (ns.Playtime and ns.Playtime.GetObserved and ns.Playtime:GetObserved()) or 0
+end
+
+-- Open or extend the pending claim. `b0` is pinned to the bank value as we last saw it BEFORE
+-- the first unsettled gap, so several gaps before one bank visit still settle correctly: the
+-- total withdrawal across all of them should equal b0 - (value at that visit).
+local function addBankClaim(w, amount)
+    if not amount or amount <= 0 then return end
+    local c = w.bankClaim
+    if not c then
+        c = { amt = 0, b0 = w.vBank or 0, ob = playedNow() }
+        w.bankClaim = c
+    end
+    c.amt = (c.amt or 0) + amount
+end
+
+-- Settle the claim. `bankNow` is the first trustworthy bank reading since it was opened; pass
+-- nil to settle a timed-out claim (nothing substantiated). Returns the amount folded in.
+local function resolveBankClaim(w, bankNow)
+    local c = w.bankClaim
+    if not c then return 0 end
+    local substantiated = 0
+    if bankNow then
+        -- How much the bank actually shrank. A DEPOSIT since the claim (negative shrink) reads
+        -- as 0, never as evidence against them.
+        substantiated = math.max(0, (c.b0 or 0) - bankNow)
+        if substantiated > (c.amt or 0) then substantiated = c.amt or 0 end
+    end
+    local unsubstantiated = (c.amt or 0) - substantiated
+    if unsubstantiated > 0 then
+        w.unaccountedValue = (w.unaccountedValue or 0) + unsubstantiated
+    end
+    w.bankClaim = nil
+    return unsubstantiated
+end
+
+-- Fold in a claim the member never came back to substantiate. Called once per login.
+function Integrity:AgeOutBankClaim()
+    local w = wealth()
+    local c = w.bankClaim
+    if not c then return end
+    local now, since = playedNow(), c.ob or 0
+    -- Both ends must be real /played readings. A claim opened before Playtime had a baseline
+    -- carries ob = 0, and measuring against that would age it out instantly on the next login —
+    -- folding in unverified value the member was never given a chance to substantiate. Stamp it
+    -- late instead, and start its clock from there.
+    if now <= 0 then return end
+    if since <= 0 then c.ob = now; return end
+    if (now - since) <= BANK_CLAIM_TIMEOUT then return end
+    if resolveBankClaim(w, nil) > 0 and ns.Comm and ns.Comm.SendStatus then
+        ns.Comm:SendStatus()
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -231,7 +386,7 @@ function Integrity:OnEnable()
     -- steady-state tracking is deaf — anything the player legitimately earns in those ~20s would
     -- otherwise read as a delta against the pre-gap baseline and fold in as unmonitored value.
     -- Sampling early bounds that blind window to the first second or two.
-    self._loginMoney, self._loginCarried = nil, nil
+    self._loginMoney, self._loginCarried, self._loginCarriedItems = nil, nil, nil
     self:SampleLogin(0)
     -- Safety net: if Playtime never attributes a login, still take a baseline so steady-state
     -- tracking and the logout flush work. Must clear Playtime's ~8-11s reconcile window PLUS this
@@ -254,8 +409,12 @@ function Integrity:SampleLogin(attempt)
         if m > 0 then self._loginMoney = m end
     end
     if self._loginCarried == nil then
-        local val, resolved = valueOf(carriedCounts())
-        if bagsLoaded() and resolved then self._loginCarried = val end
+        local counts = carriedCounts()
+        local val, resolved = valueOf(counts)
+        if bagsLoaded() and resolved then
+            self._loginCarried      = val
+            self._loginCarriedItems = counts   -- display-only item log; latched together
+        end
     end
     if self._loginMoney ~= nil and self._loginCarried ~= nil then return end
     if attempt < SAMPLE_MAX then
@@ -265,6 +424,8 @@ end
 
 function Integrity:ForceReady()
     if self._ready then return end
+    -- Covers the login where attribution never happened, so a pending claim still ages out.
+    self:AgeOutBankClaim()
     snapshotNow(wealth())
     self._ready = true
 end
@@ -276,6 +437,9 @@ end
 -- ---------------------------------------------------------------------------
 function Integrity:OnLoginAttributed(gap, added, wealthAdded)
     if self._ready then return end               -- only the first attribution matters
+    -- Settle any claim that has aged out BEFORE this login can add to it, so a stale claim can't
+    -- ride along on a fresh one's clock and stay pending indefinitely.
+    self:AgeOutBankClaim()
     if wealthAdded == nil then wealthAdded = added end
     local w = wealth()
     if wealthAdded and w.money ~= nil and Addon:WealthIntegrityOn() then
@@ -299,7 +463,8 @@ local FOLD_RETRY_MAX   = 10   -- ~10s; bags + owned-item prices essentially alwa
 function Integrity:FoldWhenReady(attempt)
     if self._ready then return end   -- ForceReady's safety net already resolved us
     local w = wealth()
-    local curVal, resolved = valueOf(carriedCounts())
+    local curCounts = carriedCounts()
+    local curVal, resolved = valueOf(curCounts)
     local loaded = bagsLoaded()
     -- Require the value to be STABLE across two consecutive attempts (~1s apart), not merely
     -- resolved: a one-shot scan can catch bags mid-load or a stack count still settling. curVal
@@ -311,30 +476,89 @@ function Integrity:FoldWhenReady(attempt)
     if baseReady and stable then
         self._prevVal = nil
         local moneyNow = (GetMoney and GetMoney()) or 0
-        -- Diff the LOGIN-INSTANT wealth against the pre-gap baseline, not the wealth as it
-        -- stands now: everything earned between login and this fold was played with the addon
-        -- loaded and must not be attributed to the unmonitored window. Fall back to the current
-        -- reading only if the early sample never latched.
-        local moneyDelta   = (self._loginMoney or moneyNow) - w.money
-        local carriedDelta = (self._loginCarried or curVal) - w.vCarried
+        -- TWO different readings are in play, and conflating them is the single edit that
+        -- silently breaks this function — so they are named apart rather than left to a comment:
+        --
+        --   anchor*                       what the player HELD AT LOGIN, latched by SampleLogin
+        --                                 within a second or two of entering the world. The ONLY
+        --                                 valid input to the diff below.
+        --   moneyNow / curVal / curCounts the CURRENT readings. Correct only as the NEW BASELINE
+        --                                 further down.
+        --
+        -- Why the diff must use the anchors: `_ready` is false from OnEnable until this fold
+        -- completes (~8-25s), so OnMoney/OnBagUpdate are DEAF for that whole window and the
+        -- current reading is contaminated by everything the player legitimately earned during it.
+        -- Diffing the current reading would attribute all of that to the unmonitored gap — i.e.
+        -- flag every player who loots anything in their first 20 seconds. There is no test suite
+        -- and no client here to catch that, so the naming is the guard.
+        --
+        -- The `or` fallbacks cover an early sample that never latched (a player holding 0 copper;
+        -- baseReady's `w.money > 0` check stops the fold in that case anyway).
+        local anchorMoney   = self._loginMoney        or moneyNow
+        local anchorCarried = self._loginCarried      or curVal
+        local anchorItems   = self._loginCarriedItems or curCounts
+        local moneyDelta    = anchorMoney   - w.money
+        local carriedDelta  = anchorCarried - w.vCarried
         -- Net rise in the login-visible buckets. A vendor buy (money down, items up) or an
         -- ordinary spend nets toward zero, so it doesn't over-flag; only a genuine net increase
         -- in what the player holds counts.
         local netDelta = moneyDelta + carriedDelta
         if netDelta > 0 then
-            -- A positive net could be value pulled from an unseen reservoir (bank withdrawal /
-            -- mail-take), not new value. Credit it against the last-known bank + mail value. No
-            -- consumption ledger is needed: bank/mail never fold gains and are re-observed fresh
-            -- on their next open, so at worst this over-credits (a miss), never under-credits.
-            local credit = (w.vBank or 0) + (w.vMail or 0)
-            if credit > netDelta then credit = netDelta end
-            netDelta = netDelta - credit
+            -- What may legitimately offset a rise? ONLY value the member already OWNED that was
+            -- sitting somewhere we couldn't see. In a closed economy that is the bank, and only
+            -- for items:
+            --
+            --  * GOLD NEVER CREDITS AGAINST THE BANK. Classic Era has no bank gold — GetMoney()
+            --    IS the entire balance, so there is no reservoir a money rise could have been
+            --    withdrawn from. Crediting money against vBank is what let a guild-bank alt
+            --    absorb outside gold up to the value of its own bank contents (found by a
+            --    member's own test: disable addon, accept outside gold, re-enable → compliant).
+            --
+            --  * GUILDMATE MAIL settles IMMEDIATELY, for gold and items alike. vMail is built by
+            --    mailItemCounts/mailGold, which skip everything mailCreditExcluded rejects
+            --    (0.7.15) — outsider, Auction House and system mail contribute nothing to it, so
+            --    mail from outside the guild can never credit away contraband. Guildmate mail IS
+            --    movement within the closed economy, so it must keep crediting or ordinary loot
+            --    distribution would flag the recipient. Consumed as used (re-crediting the same
+            --    balance every gap made one large mail a standing licence), and rebuilt from
+            --    scratch on the next mailbox open.
+            --
+            --  * THE BANK IS DEFERRED, NOT CREDITED. We cannot see it at login, and crediting a
+            --    stale vBank blind is exactly what let a stocked bank absorb anything. The
+            --    item-shaped remainder becomes a CLAIM settled against a real reading at the
+            --    next bank open (see addBankClaim / resolveBankClaim). Gold never claims —
+            --    Classic has no bank gold, so a money rise has no bank explanation at all, and
+            --    it lands as unaccounted right here.
+            if w.vBank == nil or w.vMail == nil then
+                -- Never sampled: unknown, not empty. A rise might be a bank withdrawal or a
+                -- guildmate mail-take we have no way to recognise, so we decline to fold at all
+                -- — a missed gain beats a false accusation, the standing trade-off in this
+                -- module. Each latches permanently (db.char) on its first open while loaded.
+                -- See Integrity:WealthArmed.
+                netDelta = 0
+            else
+                local fromMail = math.min(w.vMail, netDelta)
+                w.vMail  = w.vMail - fromMail
+                netDelta = netDelta - fromMail
+                -- Of what is left, only the item-shaped part could have come out of the bank.
+                local claimable = math.min(netDelta, math.max(0, carriedDelta))
+                addBankClaim(w, claimable)
+                netDelta = netDelta - claimable
+            end
         end
         if netDelta > 0 then
             w.unaccountedValue = (w.unaccountedValue or 0) + netDelta
         end
-        w.money    = moneyNow
-        w.vCarried = curVal
+        -- Record WHAT arrived, for the officer Audit view. Deliberately outside the
+        -- `netDelta > 0` test above: this is a display record of the unmonitored window, not
+        -- a consequence of the verdict, so items that were fully credited away by bank/mail
+        -- still show. It decides nothing (see recordItemDelta).
+        recordItemDelta(w, anchorItems)
+        -- NEW BASELINE: the CURRENT readings, deliberately NOT the anchors — this is precisely
+        -- where absorbing the blind window is right, so it is never re-counted on a later gap.
+        w.money        = moneyNow
+        w.vCarried     = curVal
+        w.carriedItems = curCounts
         self._ready = true
         -- Flip the member's roster row now rather than waiting a full StatusInterval.
         if ns.Comm and ns.Comm.SendStatus then ns.Comm:SendStatus() end
@@ -375,8 +599,7 @@ function Integrity:OnBagUpdate()
         self._bagTimer = nil
         if not self._ready then return end
         local w = wealth()
-        local val, resolved = valueOf(carriedCounts())
-        if bagsLoaded() and resolved then w.vCarried = val end
+        snapshotCarried(w)   -- value + item counts together (see snapshotCarried)
         -- A bag change while the bank is open is usually a bags<->bank move; refresh the bank
         -- credit value too so the transfer stays neutral.
         if self._bankOpen then
@@ -406,7 +629,18 @@ function Integrity:RefreshBank()
     local counts = bankCounts()
     if next(counts) == nil then return end       -- empty / not yet loaded: don't lower the credit
     local val, resolved = valueOf(counts)
-    if resolved then wealth().vBank = val end
+    if not resolved then return end
+    -- THE resolution point for a deferred bank claim, and it must be the FIRST trustworthy
+    -- reading of the session — before the member deposits anything, which would make the bank
+    -- look like it had never shrunk and convert an honest withdrawal into a flag. Deposits can
+    -- only happen with this frame open, and this runs 0.5s after it opens, so we are ahead of
+    -- them. resolveBankClaim clears the claim, so the repeat calls this function gets
+    -- (PLAYERBANKSLOTS_CHANGED, bag moves while open) are no-ops.
+    local w = wealth()
+    if w.bankClaim and resolveBankClaim(w, val) > 0 and ns.Comm and ns.Comm.SendStatus then
+        ns.Comm:SendStatus()
+    end
+    w.vBank = val
 end
 
 function Integrity:OnBankSlots()
@@ -435,7 +669,17 @@ end
 
 function Integrity:OnMailInbox()
     if not self._mailOpen then return end
-    local v = mailValueNow()
+    -- Mirror RefreshBank's two guards, which this path was missing. MAIL_INBOX_UPDATE fires
+    -- before the inbox headers populate, so an unconditional write let a not-yet-loaded read
+    -- (GetInboxNumItems() == 0, or prices still resolving) zero a legitimate credit — and less
+    -- credit means MORE flagging, so it could manufacture a phantom gain out of a later
+    -- guildmate mail-take. An empty read is "not loaded yet" as often as it is "no mail" and we
+    -- cannot tell them apart, so we never LOWER on one; a genuinely emptied inbox is re-sampled
+    -- correctly next session (whose peak starts at 0), and the fold consumes the credit anyway
+    -- so a stale-high value can't stand indefinitely.
+    if ((GetInboxNumItems and GetInboxNumItems()) or 0) == 0 then return end
+    local v, resolved = mailValueNow()
+    if not resolved then return end
     if v > (self._mailPeak or 0) then self._mailPeak = v end
     wealth().vMail = self._mailPeak
 end
@@ -459,17 +703,55 @@ function Integrity:GetUnaccountedValue()
     return math.floor(wealth().unaccountedValue or 0)
 end
 
+-- Can this character be judged yet? Both credit sources must have been sampled once: an
+-- unsampled reservoir is UNKNOWN rather than empty, so until each has been seen FoldWhenReady
+-- declines to fold anything and wealth integrity cannot flag. Surfaced by /sodlock wealth and on
+-- the wire as `wr`, so "why wasn't that flagged" has a visible answer instead of a silent gap.
+--
+-- Gating on vMail is only sound because OnMailInbox now refuses to write on an unloaded or
+-- unresolved read — otherwise a mailbox opened and closed in a second would ARM the check while
+-- contributing no credit, which is exactly the combination that manufactures a false positive.
+function Integrity:WealthArmed()
+    local w = wealth()
+    return (w.vBank ~= nil) and (w.vMail ~= nil)
+end
+
+-- DISPLAY-ONLY (see recordItemDelta): bounded { {itemID, count}, ... } of net per-item gains
+-- across addon-off gaps, for the officer Audit view. nil when there is nothing to show. No
+-- flag path consults this, and none should.
+-- Pending deferred-bank claim, as (amount, playedSecondsRemaining) or nil. Value that MIGHT be a
+-- bank withdrawal and is not being counted against the member until their next bank visit
+-- settles it. Diagnostic only.
+function Integrity:GetBankClaim()
+    local c = wealth().bankClaim
+    if not c or (c.amt or 0) <= 0 then return nil end
+    local since   = c.ob or 0
+    local elapsed = (since > 0) and math.max(0, playedNow() - since) or 0
+    return c.amt, math.max(0, BANK_CLAIM_TIMEOUT - elapsed)
+end
+
+function Integrity:GetItemLog()
+    local log = wealth().itemLog
+    return (type(log) == "table" and #log > 0) and log or nil
+end
+
 -- Officer forgive (received via Comm's "WGF"): zero the counter, re-baseline to now, and push a
 -- fresh ping so the member's roster row clears guild-wide. Mirrors Playtime:Rebaseline.
 function Integrity:Rebaseline()
     local w = wealth()
     w.unaccountedValue = 0
     w.unaccountedMoney = 0
+    -- The display-only item log is evidence FOR the counter being forgiven, so it clears with
+    -- it — leaving it would keep showing an officer a list they already dismissed.
+    w.itemLog = nil
+    -- An unsettled bank claim is value the officer has just decided not to pursue; leaving it
+    -- would let it mature into a fresh flag after the forgive.
+    w.bankClaim = nil
     snapshotNow(w)
     -- A forgive that lands mid-login (before attribution) must also cancel the pending fold:
     -- its latched pre-gap deltas are exactly what was just forgiven, and re-folding them would
     -- immediately re-flag the member. Baseline is now; steady-state tracking starts here.
-    self._loginMoney, self._loginCarried, self._prevVal = nil, nil, nil
+    self._loginMoney, self._loginCarried, self._loginCarriedItems, self._prevVal = nil, nil, nil, nil
     self._ready = true
     -- Refresh the credit-source baselines only if their frame is open right now.
     if self._bankOpen then
