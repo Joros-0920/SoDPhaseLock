@@ -43,9 +43,12 @@ local ADVANCE_INTERVAL = 60
 --   (1) `gap` is already discounted by `monitored` (see `loadedAt`), and that discount deliberately
 --       OVER-subtracts — we load a moment before world entry — so a clean login measures 0, not a
 --       few seconds of noise.
---   (2) The fold only ever reports a NONZERO change. A spurious short gap with no actual movement
---       folds to nothing, and ns.WEALTH_VALUE_FLOOR discards the rest as noise. So a tolerance of 0
---       costs an extra evaluation, never a false flag.
+--   (2) The fold only ever reports a NONZERO change, so a spurious short gap with no actual
+--       movement folds to nothing and a tolerance of 0 costs an extra evaluation, never a false
+--       flag. NOTE: this reason used to lean partly on ns.WEALTH_VALUE_FLOOR discarding small
+--       residue as noise. That floor is 1 COPPER as of 2026-08-06, so it no longer absorbs
+--       anything — reason (2) now rests entirely on the fold genuinely returning 0 for a gap in
+--       which nothing moved. If that ever stops holding, this tolerance is the thing to revisit.
 -- The residual it does buy us: a `/reload` leaves a real 2-5s in-world window with the addon
 -- unloaded, which 5s used to absorb silently. Now it is evaluated — and folds to nothing unless
 -- value genuinely moved in it.

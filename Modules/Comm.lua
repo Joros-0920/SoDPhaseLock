@@ -292,14 +292,14 @@ function Comm:SendStatus()
         -- 0.7.9 member falls back to the `up` played gap; a 0.7.9 officer still reads a legacy
         -- member's wm/wq (see Compliance:Record).
         wv    = (ns.Integrity and ns.Integrity:GetUnaccountedValue()) or 0,  -- estimated net copper value gained
-        -- Is the wealth check ARMED for us yet? The bank is only readable while its frame is
-        -- open, and an unsampled bank is unknown rather than empty, so Integrity declines to
-        -- fold anything until it has been seen once (see Integrity:WealthArmed). Until then
-        -- `wv` is structurally 0 — indistinguishable on the wire from an honest member with
-        -- nothing to report. Publishing readiness turns that silent blind spot into a visible
-        -- one, which is the whole model here: we can't prevent, so we surface. Additive and
+        -- Have both credit sources been sampled yet? Field name and 0/1 encoding UNCHANGED (the
+        -- wire is additive — older clients keep reading it), but as of 2026-08-06 what it tells
+        -- an officer has inverted. It used to mean "Integrity is folding nothing, so `wv` is
+        -- structurally 0 and this row is blind". Now gold always folds and items always claim,
+        -- so 0 means "unmeasured credit this member may be owed — `wv` can read HIGH". Still
+        -- worth publishing for the same reason: we can't prevent, so we surface. Additive and
         -- optional — a pre-0.7.16 client omits it, so a nil `wr` means "unknown / legacy",
-        -- never "not armed".
+        -- never "not sampled".
         wr    = (ns.Integrity and ns.Integrity.WealthArmed
                  and ns.Integrity:WealthArmed()) and 1 or 0,
         -- DISPLAY-ONLY bounded { {itemID, count}, ... } of what arrived across an addon-off

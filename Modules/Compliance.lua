@@ -239,8 +239,9 @@ function Compliance:Record(sender, data)
         -- rather than the old false-precision "+5g 11s 13c, 3 item(s)". A pre-0.7.9 member sends
         -- no `wv`; fall back to their legacy wm/wq so a mixed-version officer still sees the flag.
         if data.wv ~= nil then
-            -- Floored at ns.WEALTH_VALUE_FLOOR (1g): below that the estimate is noise. See
-            -- Addon:WealthValueReportable.
+            -- Floored at ns.WEALTH_VALUE_FLOOR — 1 COPPER since 2026-08-06, i.e. anything at all
+            -- is reported. See Addon:WealthValueReportable for why that constant is the dial to
+            -- turn if small-value rows start appearing on honest members.
             if Addon:WealthValueReportable(data.wv) then
                 reasons[#reasons + 1] = "Guild Found: " .. fmtApprox(data.wv) .. " moved while unmonitored (est.)"
             end

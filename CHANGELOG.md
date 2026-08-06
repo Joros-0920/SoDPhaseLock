@@ -4,6 +4,17 @@ All notable changes to SoD Phase Lock will be documented here.
 
 ---
 
+## [0.7.17] - 2026-08-06
+
+### Fixed
+- **Gold received while the addon was off could go unreported forever.** gold is counted immediately on the login after the gap, whether or not your bank or mailbox has ever been seen, and an unexplained rise in items becomes a pending item that settles at your next bank visit or counts automatically after 8 hours of played time. Nothing is written off any more.
+- **Opening an empty mailbox never counted as checking it.** The inbox reads as empty for a moment while it loads, and the addon can't tell that apart from genuinely having no mail — so it declined to record either. On a character whose mailbox was always empty, that meant the mail side of the check never became ready, no matter how many times you opened it. It no longer matters: an unread mailbox simply contributes no credit instead of switching the check off.
+- **Receiving a still-tradeable dungeon drop from a non-addon player could be blocked.** Bind-on-pickup drops can be traded to others who could have looted them for about two hours, and the addon allows those through when your guild has that exemption on. It recognised them by reading the countdown line on the item's tooltip — but for an item the *other* player is offering, your client is often never sent that line, so the trade stayed blocked for as long as the window lasted with no way to clear it. It now also recognises them from the item itself, which needs no tooltip: the game won't let an already-bound item into a trade slot at all, so one that's there can only be inside its trade window. Giving these items away already worked and is unchanged.
+
+### Changed
+- **Anything at all is now reported, down to a single copper.** The wealth figure previously had to reach 1 gold before officers saw it, so smaller amounts moved while the addon was off were tracked but never surfaced — a guaranteed allowance you could stay under. There is no floor any more.
+- **A pending item no longer counts against you the moment you open your bank.** If the addon had never seen your bank before, it had nothing to compare against, so the first visit settled the question as unexplained — punishing the exact thing the addon asks you to do. That first visit now just starts measuring; only a drop at a later visit settles it, and the 8-hour clock is unchanged, so this delays your reckoning without removing it.
+
 ## [0.7.16] - 2026-07-30
 
 ### Fixed

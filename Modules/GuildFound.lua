@@ -128,20 +128,32 @@ local scanTip
 local function ensureScanTip()
     if not scanTip then
         scanTip = CreateFrame("GameTooltip", "SoDPLGuildFoundScanTip", nil, "GameTooltipTemplate")
-        scanTip:SetOwner(UIParent, "ANCHOR_NONE")
     end
+    -- Re-own on EVERY scan, not once at creation. A GameTooltip is reset when it hides,
+    -- and this frame is shared between the conjured (SetHyperlink) and trade-window
+    -- (SetTradePlayerItem/SetTradeTargetItem) scans — an ownerless tooltip's Set* methods
+    -- silently populate nothing, which reads as "no BIND_TRADE line" and blocks a drop
+    -- that is still inside its group-loot trade window. Enforcement.lua and Options.lua
+    -- already re-own per scan; this one didn't. Also clears the previous scan's lines, so
+    -- a failed Set* can never be read as the *previous* item's answer.
+    scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    scanTip:ClearLines()
     return scanTip
+end
+
+-- Left text of scan-tooltip line `i`, or nil.
+local function scanLine(i)
+    local fs = _G["SoDPLGuildFoundScanTipTextLeft" .. i]
+    return fs and fs:GetText()
 end
 
 local function isConjuredLink(link)
     if not link or not ITEM_CONJURED then return false end
     local tip = ensureScanTip()
-    tip:ClearLines()
     tip:SetHyperlink(link)
     local lines = tip:NumLines()
     for i = 2, lines do
-        local fs = _G["SoDPLGuildFoundScanTipTextLeft" .. i]
-        if fs and fs:GetText() == ITEM_CONJURED then return true end
+        if scanLine(i) == ITEM_CONJURED then return true end
     end
     -- Items the trade PARTNER added may not be cached on our client, so the tooltip
     -- comes back empty (a real item tooltip always has a name line + more). We can't
@@ -164,23 +176,51 @@ local bindTradePattern = globalStringPattern(BIND_TRADE_TIME_REMAINING)
 
 -- Is the item in trade slot `index` on `side` ("player"/"target") still tradeable via
 -- its group-loot window? Scans that slot's tooltip for the BIND_TRADE line.
+--   true  — the line is there, the item is still inside its window
+--   false — the tooltip was read and carries no such line
+--   nil   — UNKNOWN: the slot's tooltip could not be read yet (the partner's item is
+--           not cached on our client, so it comes back with no lines). Callers must
+--           fail SAFE on nil (treat as blocked) and warm the cache so the verdict is
+--           retried on GET_ITEM_INFO_RECEIVED, rather than latching a wrong "no".
 local function slotInTradeWindow(side, index)
     if not bindTradePattern then return false end
     local tip = ensureScanTip()
-    tip:ClearLines()
-    if side == "player" then
-        if not tip.SetTradePlayerItem then return false end
-        tip:SetTradePlayerItem(index)
-    else
-        if not tip.SetTradeTargetItem then return false end
-        tip:SetTradeTargetItem(index)
-    end
-    for i = 2, tip:NumLines() do
-        local fs = _G["SoDPLGuildFoundScanTipTextLeft" .. i]
-        local t = fs and fs:GetText()
+    local setter = (side == "player") and tip.SetTradePlayerItem or tip.SetTradeTargetItem
+    if not setter then return false end
+    if not pcall(setter, tip, index) then return nil end
+    local lines = tip:NumLines() or 0
+    if lines < 2 then return nil end       -- a real item tooltip always has a name line + more
+    for i = 2, lines do
+        local t = scanLine(i)
         if t and t:find(bindTradePattern) then return true end
     end
     return false
+end
+
+-- Server-authoritative companion to the tooltip scan above. In trade slots
+-- 1..TRADE_ITEM_SLOTS the server refuses an item that has already bound, so a
+-- BIND_ON_PICKUP item that IS sitting in one can only have got there via its group-loot
+-- trade window — the server already made that ruling for us. bindType is static item
+-- data (GetItemInfo field 14): no tooltip, no instance state, no localized string. That
+-- is what makes it reliable on the TARGET's side, where the BIND_TRADE timer line is
+-- instance state our client may never be sent — in which case slotInTradeWindow reads a
+-- perfectly well-formed tooltip, finds no timer line, and returns a confident, wrong
+-- `false` (not nil), latching the block for the life of the window.
+--
+-- LOAD-BEARING: this is only sound because the service slot (TRADE_SERVICE_SLOT) is
+-- rejected by tradeHasBlockedContent BEFORE the slot loop, and that loop stops at
+-- TRADE_ITEM_SLOTS. Slot 7 legitimately holds SOULBOUND items (enchant/lockpick
+-- service), so routing it through here would exempt bound gear. If the service-slot
+-- rule is ever relaxed, this must take the slot index and refuse slot 7 itself.
+--
+--   true / false — bindType known
+--   nil          — uncached; caller must fail SAFE and warm, as with the tooltip path
+local BIND_ON_PICKUP = 1
+local function linkIsBindOnPickup(link)
+    if not link or not GetItemInfo then return nil end
+    local bindType = select(14, GetItemInfo(link))
+    if bindType == nil then return nil end
+    return bindType == BIND_ON_PICKUP
 end
 
 -- Inspect the live trade window. Returns true (+ a reason key) if it holds anything
@@ -194,9 +234,23 @@ local function linkNotAllowed(link, ex, side, index)
     if Addon:GuildFound("allowConjured") and isConjuredLink(link) then       -- conjured & permitted
         return false
     end
-    -- Still tradeable via its group-loot window & that exemption is on (slot-scanned).
-    if side and Addon:GuildFound("allowTradeWindow") and slotInTradeWindow(side, index) then
-        return false
+    -- Still tradeable via its group-loot window & that exemption is on. TWO independent
+    -- signals, OR'd, either of which exempts:
+    --   1. the item's static bind type — sound on both sides, since the server won't let a
+    --      bound item into slots 1..TRADE_ITEM_SLOTS at all (see linkIsBindOnPickup);
+    --   2. the slot tooltip's BIND_TRADE timer line — more precise (it names *this* item
+    --      instance), but only available when our client actually holds the partner's
+    --      instance state, which for the TARGET's side it often does not.
+    -- (2) alone used to be the whole test, which made receiving a pug drop from a
+    -- non-addon player fail whenever their item rendered without the timer line.
+    -- An UNKNOWN bind type stays blocked — fail safe — but warms the item cache so
+    -- GET_ITEM_INFO_RECEIVED re-runs EvaluateTrade and the block lifts once the partner's
+    -- item data arrives, instead of being stuck for the life of the window.
+    if side and Addon:GuildFound("allowTradeWindow") then
+        local bop = linkIsBindOnPickup(link)
+        if bop then return false end
+        if slotInTradeWindow(side, index) then return false end
+        if bop == nil and GetItemInfo then GetItemInfo(link) end
     end
     return true
 end
@@ -489,6 +543,16 @@ local function shouldBlockTrade()
     return tradeHasBlockedContent()
 end
 
+-- Which of the three block reasons tradeHasBlockedContent() returned. Naming the actual
+-- cause matters here: the old single message said "only listed exception items" even when
+-- the block was gold or the enchant slot, which reads as "your item is banned" and sent
+-- people looking for a bug in the item rules.
+local BLOCK_REASON = {
+    gold    = "Gold can't cross the guild boundary — remove it to complete this trade.",
+    service = "The 'will not be traded' slot is an enchant/lockpick service — not allowed outside your guild.",
+    item    = "Outside your guild you may only trade listed exception items — never gold. (|cffffd100/sodlock trade|r explains this window.)",
+}
+
 -- Evaluate the current trade against the policy. The window is never force-closed;
 -- instead the default UI's Trade button is disabled while the window holds anything
 -- that can't be traded outside your guild, so the trade can't be accepted until it's
@@ -496,13 +560,96 @@ end
 -- button we disabled, so Blizzard's own accept-handshake state is left alone.
 function GuildFound:EvaluateTrade()
     local btn = TradeFrameTradeButton
-    if shouldBlockTrade() then
+    local blocked, reason = shouldBlockTrade()
+    if blocked then
         if btn then btn:Disable() end
         self.tradeBtnDisabled = true
-        Addon:Alert("Outside your guild you may only trade listed exception items — never gold.", "guildfound-trade-content")
+        Addon:Alert(BLOCK_REASON[reason] or BLOCK_REASON.item, "guildfound-trade-content")
     elseif self.tradeBtnDisabled then
         if btn then btn:Enable() end
         self.tradeBtnDisabled = false
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- `/sodlock trade` — explain the OPEN trade window, slot by slot.
+--
+-- "This drop is still inside its 2h group-loot window, why is it blocked?" has several
+-- independent gates (master switch, the guild's trade toggle, the allowTradeWindow
+-- sub-toggle, and whether the slot's tooltip is even readable on this client), none of
+-- which were visible anywhere. Prints every gate plus, for each blocked slot, the raw
+-- tooltip lines we scanned — so a missing/renamed BIND_TRADE line shows up immediately
+-- instead of being indistinguishable from "the toggle is off".
+-- ---------------------------------------------------------------------------
+local function yn(v) return v and "|cff00ff00yes|r" or "|cffff3030no|r" end
+
+function GuildFound:TradeDiagnostics()
+    local p = function(...) Addon:Print(string.format(...)) end
+    Addon:Print("|cffffd100Guild Found trade diagnostics:|r")
+    p("  enabled: %s   trade rule: %s   (both needed for ANY trade enforcement)",
+        yn(Addon.db.profile.enabled), yn(Addon:GuildFound("trade")))
+    p("  exemptions — conjured: %s   trade window (2h pug drops): %s",
+        yn(Addon:GuildFound("allowConjured")), yn(Addon:GuildFound("allowTradeWindow")))
+    p("  BIND_TRADE_TIME_REMAINING pattern built: %s", yn(bindTradePattern ~= nil))
+    if not (TradeFrame and TradeFrame:IsShown()) then
+        Addon:Print("  |cffffd100No trade window open — open one with the item in it and re-run.|r")
+        return
+    end
+    local partner = UnitName("NPC")
+    p("  partner: |cffffd100%s|r   guildmate: %s%s", partner or "—", yn(isGuildmate(partner)),
+        isGuildmate(partner) and " |cff808080(guildmates are never blocked)|r" or "")
+    p("  gold — yours: %s  theirs: %s",
+        GetCoinTextureString(GetPlayerTradeMoney() or 0), GetCoinTextureString(GetTargetTradeMoney() or 0))
+
+    local ex = Addon:GetRuleset().guildFound.tradeExceptions
+    for _, side in ipairs({ "player", "target" }) do
+        local getLink = (side == "player") and GetTradePlayerItemLink or GetTradeTargetItemLink
+        if getLink then
+            for i = 1, TRADE_SERVICE_SLOT do
+                local link = getLink(i)
+                if link then
+                    local label = (side == "player") and "yours" or "theirs"
+                    if i == TRADE_SERVICE_SLOT then
+                        p("  [%s] service slot: %s |cffff3030blocked (service across the guild boundary)|r",
+                            label, link)
+                    else
+                        local id = tonumber(link:match("item:(%d+)"))
+                        local onList = (id and ex[id]) and true or false
+                        local win = slotInTradeWindow(side, i)
+                        local bop = linkIsBindOnPickup(link)
+                        p("  [%s slot %d] %s", label, i, link)
+                        p("      allowlisted: %s   conjured: %s", yn(onList), yn(isConjuredLink(link)))
+                        -- Both trade-window signals, reported separately: either one alone
+                        -- exempts, so seeing WHICH fired is the whole point when a pug drop
+                        -- is unexpectedly blocked (a "no" on the timer line with a "yes" on
+                        -- bind-on-pickup is the normal, healthy state on the partner's side).
+                        p("      trade window — bind-on-pickup: %s   timer line: %s",
+                            (bop == nil) and "|cffffd100unknown (item not cached yet)|r" or yn(bop),
+                            (win == nil) and "|cffffd100unreadable (item not cached yet)|r" or yn(win))
+                        if not linkNotAllowed(link, ex, side, i) then
+                            Addon:Print("      |cff00ff00allowed|r")
+                        else
+                            Addon:Print("      |cffff3030blocked|r — tooltip lines scanned:")
+                            ensureScanTip()
+                            local setter = (side == "player") and scanTip.SetTradePlayerItem
+                                                              or scanTip.SetTradeTargetItem
+                            if setter and pcall(setter, scanTip, i) then
+                                local n = scanTip:NumLines() or 0
+                                if n == 0 then
+                                    Addon:Print("        |cffff3030(none — the slot tooltip returned nothing)|r")
+                                end
+                                for l = 1, n do
+                                    local t = scanLine(l)
+                                    if t and t ~= "" then Addon:Print("        " .. t) end
+                                end
+                            else
+                                Addon:Print("        |cffff3030(the slot tooltip API refused this slot)|r")
+                            end
+                        end
+                    end
+                end
+            end
+        end
     end
 end
 

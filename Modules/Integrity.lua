@@ -314,7 +314,14 @@ local function addBankClaim(w, amount)
     if not amount or amount <= 0 then return end
     local c = w.bankClaim
     if not c then
-        c = { amt = 0, b0 = w.vBank or 0, ob = playedNow() }
+        -- b0 stays NIL when the bank has never been sampled: "unknown", not "empty". Encoding
+        -- it as 0 would make every later reading look like a zero shrink and settle the claim
+        -- as fully unsubstantiated the instant the member opened their bank — punishing the
+        -- exact action `/sodlock wealth` tells them to take. resolveBankClaim adopts the first
+        -- trustworthy reading as the baseline instead. This path is now common: before
+        -- 2026-08-06 an unsampled bank suppressed the whole fold, so no claim was ever opened
+        -- without a baseline.
+        c = { amt = 0, b0 = w.vBank, ob = playedNow() }
         w.bankClaim = c
     end
     c.amt = (c.amt or 0) + amount
@@ -327,9 +334,14 @@ local function resolveBankClaim(w, bankNow)
     if not c then return 0 end
     local substantiated = 0
     if bankNow then
+        -- Defensive: a real reading can only settle a claim that HAS a baseline. RefreshBank
+        -- adopts one before ever routing here, so this should be unreachable — but settling
+        -- against a nil b0 would fold the whole claim in unsubstantiated, so leave it pending
+        -- rather than guess. The 8h timeout (bankNow == nil) still resolves it either way.
+        if c.b0 == nil then return 0 end
         -- How much the bank actually shrank. A DEPOSIT since the claim (negative shrink) reads
         -- as 0, never as evidence against them.
-        substantiated = math.max(0, (c.b0 or 0) - bankNow)
+        substantiated = math.max(0, c.b0 - bankNow)
         if substantiated > (c.amt or 0) then substantiated = c.amt or 0 end
     end
     local unsubstantiated = (c.amt or 0) - substantiated
@@ -529,22 +541,39 @@ function Integrity:FoldWhenReady(attempt)
             --    next bank open (see addBankClaim / resolveBankClaim). Gold never claims —
             --    Classic has no bank gold, so a money rise has no bank explanation at all, and
             --    it lands as unaccounted right here.
-            if w.vBank == nil or w.vMail == nil then
-                -- Never sampled: unknown, not empty. A rise might be a bank withdrawal or a
-                -- guildmate mail-take we have no way to recognise, so we decline to fold at all
-                -- — a missed gain beats a false accusation, the standing trade-off in this
-                -- module. Each latches permanently (db.char) on its first open while loaded.
-                -- See Integrity:WealthArmed.
-                netDelta = 0
-            else
-                local fromMail = math.min(w.vMail, netDelta)
-                w.vMail  = w.vMail - fromMail
-                netDelta = netDelta - fromMail
-                -- Of what is left, only the item-shaped part could have come out of the bank.
-                local claimable = math.min(netDelta, math.max(0, carriedDelta))
-                addBankClaim(w, claimable)
-                netDelta = netDelta - claimable
-            end
+            -- 2026-08-06: an unsampled reservoir NO LONGER SUPPRESSES THE FOLD. This block used
+            -- to open with `if w.vBank == nil or w.vMail == nil then netDelta = 0`, which zeroed
+            -- the ENTIRE delta — gold included — because the BANK had never been seen, directly
+            -- contradicting the "gold never credits against the bank" rule three bullets up. A
+            -- member could disable the addon, accept outside gold, re-enable, and stay compliant
+            -- forever on any character that had never opened a mailbox (reported from a live
+            -- test). Unknown credit is now DEFERRED, never dropped.
+            --
+            -- Split the rise by SHAPE first, because the two axes have different explanations.
+            -- Each is capped at netDelta so an offsetting fall on the other axis (a vendor buy,
+            -- an ordinary spend) still nets away exactly as before.
+            local moneyPart   = math.min(math.max(0, moneyDelta), netDelta)
+            local carriedPart = netDelta - moneyPart
+            -- MAIL credits both axes and settles immediately; unsampled (nil) simply contributes
+            -- nothing rather than blocking. Consumed as used, and never written back when it was
+            -- never sampled (nil must stay nil — it is the "never seen" marker WealthArmed reads).
+            local fromMail = math.min(w.vMail or 0, netDelta)
+            if w.vMail ~= nil then w.vMail = w.vMail - fromMail end
+            -- Spend that credit on the MONEY axis first. Money is folded in immediately below
+            -- while items only open a deferred claim, so applying the credit to the harsher axis
+            -- is the forgiving apportionment — and vMail is a single scalar (schema 2), so there
+            -- is no way to tell which part of it was gold and which was items.
+            local mailToMoney = math.min(fromMail, moneyPart)
+            moneyPart   = moneyPart   - mailToMoney
+            carriedPart = carriedPart - (fromMail - mailToMoney)
+            -- Only the item-shaped part could ever have come out of the bank, so only it claims.
+            -- Unconditional now: with vBank nil the claim opens with no baseline and settles via
+            -- the adopt-then-age-out path in addBankClaim/resolveBankClaim.
+            addBankClaim(w, carriedPart)
+            -- What survives is money with no mail explanation and no possible bank explanation
+            -- (Classic Era has no bank gold). It lands as unaccounted RIGHT HERE, on this login,
+            -- whether or not either reservoir was ever sampled — the whole point of the change.
+            netDelta = moneyPart
         end
         if netDelta > 0 then
             w.unaccountedValue = (w.unaccountedValue or 0) + netDelta
@@ -621,6 +650,9 @@ end
 -- ---------------------------------------------------------------------------
 function Integrity:OnBankOpened()
     self._bankOpen = true
+    -- One claim decision per bank SESSION (see RefreshBank). Transient by design — a persisted
+    -- flag would survive a relog and skip a legitimate settlement.
+    self._claimSettled = false
     self:ScheduleTimer("RefreshBank", 0.5)
 end
 
@@ -634,11 +666,28 @@ function Integrity:RefreshBank()
     -- reading of the session — before the member deposits anything, which would make the bank
     -- look like it had never shrunk and convert an honest withdrawal into a flag. Deposits can
     -- only happen with this frame open, and this runs 0.5s after it opens, so we are ahead of
-    -- them. resolveBankClaim clears the claim, so the repeat calls this function gets
-    -- (PLAYERBANKSLOTS_CHANGED, bag moves while open) are no-ops.
+    -- them.
+    --
+    -- `_claimSettled` (reset per bank open) is what makes the repeat calls this function gets
+    -- (PLAYERBANKSLOTS_CHANGED, bag moves while open) no-ops. It used to be enough that
+    -- resolveBankClaim niled the claim — but the no-baseline ADOPT path below deliberately
+    -- leaves it pending, and without this guard the second call of the same session would
+    -- re-enter with b0 now set and any deposit already applied, settling the claim as
+    -- unsubstantiated. That is precisely the false flag the paragraph above exists to prevent.
     local w = wealth()
-    if w.bankClaim and resolveBankClaim(w, val) > 0 and ns.Comm and ns.Comm.SendStatus then
-        ns.Comm:SendStatus()
+    local c = w.bankClaim
+    if c and not self._claimSettled then
+        self._claimSettled = true
+        if c.b0 == nil then
+            -- Claim opened while the bank had never been sampled. There is no "before" to
+            -- measure a withdrawal against, so ADOPT this reading as the baseline and leave the
+            -- claim pending — it can only be settled by a shrink observed at a LATER opening.
+            -- The 8h played timeout still runs from the original `ob`, so this delays the
+            -- member's reckoning, it does not remove it.
+            c.b0 = val
+        elseif resolveBankClaim(w, val) > 0 and ns.Comm and ns.Comm.SendStatus then
+            ns.Comm:SendStatus()
+        end
     end
     w.vBank = val
 end
@@ -703,17 +752,22 @@ function Integrity:GetUnaccountedValue()
     return math.floor(wealth().unaccountedValue or 0)
 end
 
--- Can this character be judged yet? Both credit sources must have been sampled once: an
--- unsampled reservoir is UNKNOWN rather than empty, so until each has been seen FoldWhenReady
--- declines to fold anything and wealth integrity cannot flag. Surfaced by /sodlock wealth and on
--- the wire as `wr`, so "why wasn't that flagged" has a visible answer instead of a silent gap.
+-- Have the two credit sources been sampled? As of 2026-08-06 this NO LONGER GATES FLAGGING.
+-- It used to: an unsampled reservoir suppressed the whole fold, which is what let outside gold
+-- vanish permanently on a character that had never opened a mailbox. Money now always folds and
+-- items always claim, so this is a DATA-QUALITY signal only, and its meaning has INVERTED —
+-- false now means the figures may OVER-report (credit the member is owed has not been measured
+-- yet), where it used to mean they under-report to zero. Officers should read it as "corroborate
+-- before acting", never as "nothing is being checked". Surfaced by /sodlock wealth and, unchanged
+-- on the wire, as `wr`.
 --
--- Gating on vMail is only sound because OnMailInbox now refuses to write on an unloaded or
--- unresolved read — otherwise a mailbox opened and closed in a second would ARM the check while
--- contributing no credit, which is exactly the combination that manufactures a false positive.
+-- Reading vMail is only sound because OnMailInbox refuses to write on an unloaded or unresolved
+-- read — otherwise a mailbox opened and closed in a second would look sampled while contributing
+-- no credit, which is exactly the combination that manufactures a false positive.
+function Integrity:MailArmed() return wealth().vMail ~= nil end
+function Integrity:BankArmed() return wealth().vBank ~= nil end
 function Integrity:WealthArmed()
-    local w = wealth()
-    return (w.vBank ~= nil) and (w.vMail ~= nil)
+    return self:MailArmed() and self:BankArmed()
 end
 
 -- DISPLAY-ONLY (see recordItemDelta): bounded { {itemID, count}, ... } of net per-item gains

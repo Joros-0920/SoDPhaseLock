@@ -344,17 +344,22 @@ local NOT_DETECTED_CAP = 25
 
 -- Status cell text for a guild row, plus any officer-only footnote.
 --
--- "wealth check not yet armed": the member's addon has not sampled their bank and mailbox
--- yet, so Guild Found wealth integrity structurally reports 0 for them (an unsampled
--- reservoir is unknown, not empty — see Modules/Integrity.lua) and the row reads clean
--- whether or not it is. That blind spot is worth an officer knowing about, but it is NOT a
--- violation — the member has done nothing wrong and can't hurry it — so it decorates the
--- cell only and never enters `reasons`, which is what decides `compliant`. A nil
--- `wealthArmed` is a pre-0.7.16 client: unknown, so say nothing.
+-- "credit sources not fully sampled": the member's addon has not seen their bank and mailbox
+-- yet. Before 2026-08-06 that made wealth integrity structurally report 0 for them and the row
+-- read clean whether or not it was. It no longer suppresses anything (see Integrity:WealthArmed)
+-- — gold counts immediately and items open a deferred claim — so the note now warns the other
+-- way: credit the member may be owed hasn't been measured, so their figure can read HIGH.
+-- Either way it is NOT a violation — the member has done nothing wrong and can't hurry it — so
+-- it decorates the cell only and never enters `reasons`, which is what decides `compliant`. A
+-- nil `wealthArmed` is a pre-0.7.16 client: unknown, so say nothing.
 local function statusCell(info, officer)
     local text = info.reasons or "OK"
     if officer and info.wealthArmed == 0 and Addon:WealthIntegrityOn() then
-        text = text .. " |cff808080(wealth check not yet armed)|r"
+        -- Meaning INVERTED on 2026-08-06 (see Integrity:WealthArmed): this used to mark a row as
+        -- structurally under-reporting. Gold is now always counted and items always claim, so an
+        -- unsampled reservoir means unmeasured credit the member may be OWED — the figure can
+        -- read high. Still decoration only, still never a `reasons` entry.
+        text = text .. " |cff808080(credit sources not fully sampled — may read high)|r"
     end
     return text
 end

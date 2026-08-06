@@ -428,16 +428,24 @@ function Addon:WealthIntegrityOn()
 end
 
 -- Minimum estimated value (copper) before an unmonitored-wealth figure is worth an officer's
--- attention. `wv` is an ESTIMATE built from vendor sell prices (unknown/uncached items count 0),
--- so the low end of its range is noise, not signal — a stray copper of quest/vendor income
--- caught at a session boundary is not evidence of an outside trade, and reporting it as one
--- ("~16c moved while unmonitored") burns officer trust in the whole check.
+-- attention. Set to 1 copper on 2026-08-06 at the guild's request: in a closed economy ANY
+-- unexplained value is the signal, and a floor is a guaranteed allowance a member can sit under.
+--
+-- Read this before raising it again. `wv` is an ESTIMATE built from vendor sell prices
+-- (unknown/uncached items count 0), so its low end carries noise: a few copper of quest or
+-- vendor income caught at a session boundary is not evidence of an outside trade, and reporting
+-- it as one ("~16c moved while unmonitored") is what burns officer trust in the whole check. At
+-- 1c that noise now reaches officers, and the surrounding design is what keeps it tolerable —
+-- the fold nets spends against gains, guildmate mail credits, and an item rise defers to a bank
+-- claim, so a member doing ordinary things should still land at exactly 0. If small-value rows
+-- start appearing on honest members, this constant is the dial: raising it suppresses them
+-- without touching detection, since the counter keeps accruing either way.
 --
 -- Applied to the CUMULATIVE counter at REPORT time, never to an individual fold: repeated small
--- gains still accrue and cross the floor, so this suppresses noise without creating a free
+-- gains still accrue and cross the floor, so a floor suppresses noise without creating a free
 -- allowance a member could drip value through. Receiver-side, so the floor an officer sees is
 -- their own client's — a member can't lower it, and it needs no wire field.
-ns.WEALTH_VALUE_FLOOR = 10000   -- 1g
+ns.WEALTH_VALUE_FLOOR = 1   -- 1c — report anything at all
 
 -- Is this member's estimated unmonitored value worth reporting? Single predicate so the roster
 -- reason text and the Clear-button gate can never disagree about who is flagged.
@@ -688,6 +696,12 @@ function Addon:HandleSlash(input)
         else
             self:Print("  Baganator: not detected (using default Blizzard bag overlay)")
         end
+    elseif input == "trade" then
+        -- Explain the open trade window slot by slot: which gate blocked it, and (for a
+        -- blocked item) the raw tooltip lines we scanned — so "this drop is still in its
+        -- 2h group-loot window" can be told apart from "the exemption toggle is off".
+        local gf = self:GetModule("GuildFound", true)
+        if gf and gf.TradeDiagnostics then gf:TradeDiagnostics() end
     elseif input == "wealth" then
         -- Explain whether the Guild Found wealth-integrity check (Modules/Integrity.lua)
         -- is actually evaluating for this character right now, and what it currently holds
@@ -719,12 +733,15 @@ function Addon:HandleSlash(input)
             (integrity and integrity._ready) and "|cff00ff00yes|r" or "|cffff3030not yet|r",
             coin(w.money), coin(w.vCarried), coin(w.vBank), coin(w.vMail)))
         -- Neither credit source is readable unless its frame is open, so until each has been
-        -- seen once it is UNKNOWN (not empty) and folding is suppressed entirely — otherwise a
-        -- first bank withdrawal across an addon-off gap would read as value from outside.
+        -- seen once it is UNKNOWN (not empty). This no longer PAUSES anything (it did before
+        -- 2026-08-06, which is what let outside gold vanish on a never-mailed character): gold
+        -- is counted on the spot regardless, and an item rise opens a deferred claim. Unsampled
+        -- now means the member may be owed credit we haven't measured, so the figure can read
+        -- HIGH — the opposite of the old blind spot.
         local armed = integrity and integrity.WealthArmed and integrity:WealthArmed()
-        self:Print(string.format("  wealth check armed: %s  (bank: %s, mailbox: %s)",
-            armed and "|cff00ff00yes|r"
-                or "|cffffd100not yet — flagging is paused until you open each once|r",
+        self:Print(string.format("  credit sources sampled: %s  (bank: %s, mailbox: %s)",
+            armed and "|cff00ff00both|r"
+                or "|cffffd100not both — gold still counts; figures may read high until you open each once|r",
             (w.vBank ~= nil) and "|cff00ff00seen|r" or "|cffff3030never|r",
             (w.vMail ~= nil) and "|cff00ff00seen|r" or "|cffff3030never|r"))
         -- Only GUILDMATE mail ever enters the mail figure, and it settles immediately. The bank
@@ -734,9 +751,16 @@ function Addon:HandleSlash(input)
             coin(w.vBank), coin(w.vMail)))
         local claim, remain = (integrity and integrity.GetBankClaim) and integrity:GetBankClaim()
         if claim then
+            -- A claim opened before the bank was ever sampled has no baseline to measure a
+            -- withdrawal against: the next bank visit ADOPTS one rather than settling, so say
+            -- so instead of promising a settlement that visit can't deliver.
+            local w2 = self.db.char.wealth or {}
+            local noBase = (w2.bankClaim and w2.bankClaim.b0 == nil) and true or false
             self:Print(string.format(
-                "  pending bank claim: %s |cff808080— not counted against you; open your bank to settle it"
-                .. " (auto-counts after %.1fh more played)|r", GetCoinTextureString(claim), (remain or 0) / 3600))
+                "  pending bank claim: %s |cff808080— not counted against you; %s"
+                .. " (auto-counts after %.1fh more played)|r", GetCoinTextureString(claim),
+                noBase and "your bank has never been seen, so the next visit starts measuring from there"
+                    or "open your bank to settle it", (remain or 0) / 3600))
         end
         local value = integrity and integrity:GetUnaccountedValue() or 0
         self:Print(string.format("  estimated value gained while off: %s  (best-effort; vendor sell price, unknown items count 0)",
